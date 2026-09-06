@@ -70,6 +70,10 @@ FSM:
 
     policy_dir: config/policy/velocity
 
+    data_log:
+      enabled: true
+      output_dir: log/deployment
+
 
   Mimic_Dance1_subject2:
     transitions:
