@@ -17,3 +17,6 @@ simulate/build
 # Python bytecode and caches
 __pycache__/
 *.py[cod]
+
+# Generated deployment CSV logs
+deploy/robots/g1/log/
