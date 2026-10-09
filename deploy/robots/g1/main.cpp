@@ -20,6 +20,8 @@ void init_fsm_state()
     }
     FSMState::lowcmd = std::make_unique<LowCmd_t>();
     FSMState::lowstate = std::make_shared<LowState_t>();
+    //Redcue the timeout to 200 ms for faster detection of robot connection loss.
+    FSMState::lowstate->set_timeout_ms(200);
     spdlog::info("Waiting for connection to robot...");
     FSMState::lowstate->wait_for_connection();
     spdlog::info("Connected to robot.");
