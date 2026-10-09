@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <array>
 #include <mutex>
+#include <cmath>
 namespace isaaclab
 {
 // keyboard velocity commands example
@@ -62,6 +63,31 @@ State_RLBase::State_RLBase(int state_mode, std::string state_string)
         std::make_shared<unitree::BaseArticulation<LowState_t::SharedPtr>>(FSMState::lowstate)
     );
     env->alg = std::make_unique<isaaclab::OrtRunner>(policy_dir / "exported" / "policy.onnx");
+    //Check for Per-joint pos/vel/torque limits -> Passive
+    const auto safety_cfg = cfg["safety"];
+    if (safety_cfg && safety_cfg["enabled"].as<bool>()) {
+        safety_q_min_ = safety_cfg["q_min"].as<std::vector<float>>();
+        safety_q_max_ = safety_cfg["q_max"].as<std::vector<float>>();
+        safety_dq_max_ = safety_cfg["dq_max"].as<std::vector<float>>();
+        safety_tau_max_ = safety_cfg["tau_max"].as<std::vector<float>>();
+        safety_tau_debounce_ticks_ = safety_cfg["tau_debounce_ms"].as<int>();
+
+        // A short table would silently leave joints unchecked; fail before the robot moves.
+        const auto joint_count = env->robot->data.joint_ids_map.size();
+        if (safety_q_min_.size() != joint_count || safety_q_max_.size() != joint_count ||
+            safety_dq_max_.size() != joint_count || safety_tau_max_.size() != joint_count) {
+            throw std::runtime_error("safety: each limit array needs one entry per joint");
+        }
+
+        // Front of the list: a limit violation must win over any joystick transition.
+        registered_checks.emplace(
+            registered_checks.begin(),
+            [this]() -> bool { return safety_limits_exceeded(); },
+            FSMStringMap.right.at("Passive"));
+        spdlog::info("Safety limits enabled for {}", state_string);
+    } else {
+        spdlog::warn("Safety limits DISABLED for {}", state_string);
+    }
 
     this->registered_checks.emplace_back(
         std::make_pair(
@@ -285,4 +311,43 @@ void State_RLBase::close_data_log()
     data_log_file_.flush();
     data_log_file_.close();
     spdlog::info("Velocity data log closed.");
+}
+
+bool State_RLBase::safety_limits_exceeded()
+{
+    // Read the freshest LowState (1 kHz), not env->robot->data (50 Hz, policy thread).
+    std::lock_guard<std::mutex> lock(FSMState::lowstate->mutex_);
+    const auto& motor_state = FSMState::lowstate->msg_.motor_state();
+
+    int tau_motor = -1;
+    for (std::size_t m = 0; m < safety_q_min_.size(); ++m) {
+        const float q = motor_state[m].q();
+        const float dq = motor_state[m].dq();
+        const float tau = motor_state[m].tau_est();
+
+        // Written as !(inside) so a NaN reading also counts as a violation.
+        if (!(q >= safety_q_min_[m] && q <= safety_q_max_[m])) {
+            spdlog::critical("SAFETY: motor {} position {:.3f} outside [{:.3f}, {:.3f}] -> Passive",
+                             m, q, safety_q_min_[m], safety_q_max_[m]);
+            return true;
+        }
+        if (!(std::fabs(dq) <= safety_dq_max_[m])) {
+            spdlog::critical("SAFETY: motor {} velocity {:.2f} exceeds {:.2f} rad/s -> Passive",
+                             m, dq, safety_dq_max_[m]);
+            return true;
+        }
+        if (tau_motor < 0 && !(std::fabs(tau) <= safety_tau_max_[m])) {
+            tau_motor = static_cast<int>(m);
+        }
+    }
+
+    // Only sustained torque trips; single-tick spikes reset the count.
+    safety_tau_over_count_ = (tau_motor >= 0) ? safety_tau_over_count_ + 1 : 0;
+    if (safety_tau_over_count_ > safety_tau_debounce_ticks_) {
+        spdlog::critical("SAFETY: motor {} torque {:.1f} over {:.1f} Nm for {} ms -> Passive",
+                         tau_motor, motor_state[tau_motor].tau_est(),
+                         safety_tau_max_[tau_motor], safety_tau_over_count_);
+        return true;
+    }
+    return false;
 }

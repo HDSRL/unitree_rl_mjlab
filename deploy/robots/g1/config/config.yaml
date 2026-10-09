@@ -73,6 +73,38 @@ FSM:
     data_log:
       enabled: true
       output_dir: log/deployment
+    
+    safety:
+      enabled: true
+      # Per-joint limits in SDK motor order (same order as FixStand kp/kd):
+      # L leg 0-5, R leg 6-11, waist 12-14, L arm 15-21, R arm 22-28.
+      # Position [rad]: mjlab soft limits (90% of hardware range).
+      q_min: [-2.260, -0.349, -2.482,  0.061, -0.803, -0.236,
+              -2.260, -2.793, -2.482,  0.061, -0.803, -0.236,
+              -2.356, -0.468, -0.468,
+              -2.801, -1.396, -2.356, -0.890, -1.775, -1.453, -1.453,
+              -2.801, -2.060, -2.356, -0.890, -1.775, -1.453, -1.453]
+      q_max: [ 2.609,  2.793,  2.482,  2.731,  0.454,  0.236,
+               2.609,  0.349,  2.482,  2.731,  0.454,  0.236,
+               2.356,  0.468,  0.468,
+               2.382,  2.060,  2.356,  1.937,  1.775,  1.453,  1.453,
+               2.382,  1.396,  2.356,  1.937,  1.775,  1.453,  1.453]
+      # Velocity [rad/s]: ~50-60% of motor max speed (7520-14: 32, 7520-22: 20, 5020: 37, 4010: 22).
+      dq_max: [16, 12, 16, 12, 18, 18,
+               16, 12, 16, 12, 18, 18,
+               16, 18, 18,
+               18, 18, 18, 18, 18, 11, 11,
+               18, 18, 18, 18, 18, 11, 11]
+      # Torque [Nm]: 90% of motor effort limit (88 / 139 / 2x25 / 25 / 5).
+      tau_max: [79, 125, 79, 125, 45, 45,
+                79, 125, 79, 125, 45, 45,
+                79, 45, 45,
+                22.5, 22.5, 22.5, 22.5, 22.5, 4.5, 4.5,
+                22.5, 22.5, 22.5, 22.5, 22.5, 4.5, 4.5]
+      # tau_est is noisy and spikes on foot impacts; only sustained torque trips.
+      # CtrlFSM runs at 1 kHz, so 1 tick = 1 ms.
+      tau_debounce_ms: 20
+
 
 
   Mimic_Dance1_subject2:

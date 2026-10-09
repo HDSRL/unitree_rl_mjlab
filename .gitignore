@@ -20,3 +20,4 @@ __pycache__/
 
 # Generated deployment CSV logs
 deploy/robots/g1/log/
+CLAUDE.md

@@ -34,6 +34,8 @@ public:
         policy_work_overruns_ = 0;
         max_policy_wake_lateness_ms_ = 0.0;
         policy_wake_late_over_1ms_count_ = 0;
+        // reset safety counters
+        safety_tau_over_count_ = 0;
         // Open the CSV before the policy thread begins producing samples.
         open_data_log();
         // Start policy thread
@@ -153,6 +155,16 @@ private:
     // Scheduler delay after sleep_until(); count only meaningful delays.
     double max_policy_wake_lateness_ms_ = 0.0;
     std::uint64_t policy_wake_late_over_1ms_count_ = 0;
+
+    // Per-joint safety limits in SDK motor order, checked at 1 kHz by CtrlFSM.
+    bool safety_limits_exceeded();
+    std::vector<float> safety_q_min_;
+    std::vector<float> safety_q_max_;
+    std::vector<float> safety_dq_max_;
+    std::vector<float> safety_tau_max_;
+    int safety_tau_debounce_ticks_ = 0;
+    int safety_tau_over_count_ = 0;
+
 };
 
 REGISTER_FSM(State_RLBase)
