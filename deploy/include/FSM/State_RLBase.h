@@ -26,7 +26,8 @@ public:
             lowcmd->msg_.motor_cmd()[i].tau() = 0;
         }
 
-        env->robot->update();
+        //Calling reset to avoid initial joint target positions being set to zero, which can cause a large initial torque spike.
+        env->reset();
         // Do not mix timing results from separate Velocity sessions.
         max_env_step_ms_ = 0.0;
         max_data_log_ms_ = 0.0;
@@ -44,7 +45,6 @@ public:
             using clock = std::chrono::high_resolution_clock;
             const std::chrono::duration<double> desiredDuration(env->step_dt);
             const auto dt = std::chrono::duration_cast<clock::duration>(desiredDuration);
-            env->reset();
             // Initialize timing
             auto sleepTill = clock::now() + dt;
 

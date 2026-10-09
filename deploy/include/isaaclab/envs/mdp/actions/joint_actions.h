@@ -78,6 +78,8 @@ public:
     void reset()
     {
         _raw_actions.assign(_action_dim, 0.0f);
+        // processed actions are also set correspondingly during initialization to avoid the initial torque spike when the robot is in a non-zero position.
+        process_actions(_raw_actions);
     }
 
 protected:
