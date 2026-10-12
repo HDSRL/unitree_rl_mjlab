@@ -89,6 +89,9 @@ State_RLBase::State_RLBase(int state_mode, std::string state_string)
         spdlog::warn("Safety limits DISABLED for {}", state_string);
     }
 
+    //check for policy control enable or disable
+    policy_control_enabled_ = cfg["policy_control_enabled"].as<bool>();
+
     this->registered_checks.emplace_back(
         std::make_pair(
             [&]()->bool{ return isaaclab::mdp::bad_orientation(env.get(), 1.0); },
@@ -99,6 +102,9 @@ State_RLBase::State_RLBase(int state_mode, std::string state_string)
 
 void State_RLBase::run()
 {
+    if(!policy_control_enabled_) {
+        return;
+    }
     auto action = env->action_manager->processed_actions();
     for(int i(0); i < env->robot->data.joint_ids_map.size(); i++) {
         lowcmd->msg_.motor_cmd()[env->robot->data.joint_ids_map[i]].q() = action[i];

@@ -18,12 +18,14 @@ public:
     void enter()
     {
         // set gain
-        for (int i = 0; i < env->robot->data.joint_stiffness.size(); ++i)
-        {
-            lowcmd->msg_.motor_cmd()[i].kp() = env->robot->data.joint_stiffness[i];
-            lowcmd->msg_.motor_cmd()[i].kd() = env->robot->data.joint_damping[i];
-            lowcmd->msg_.motor_cmd()[i].dq() = 0;
-            lowcmd->msg_.motor_cmd()[i].tau() = 0;
+        if(policy_control_enabled_){
+            for (int i = 0; i < env->robot->data.joint_stiffness.size(); ++i)
+            {
+                lowcmd->msg_.motor_cmd()[i].kp() = env->robot->data.joint_stiffness[i];
+                lowcmd->msg_.motor_cmd()[i].kd() = env->robot->data.joint_damping[i];
+                lowcmd->msg_.motor_cmd()[i].dq() = 0;
+                lowcmd->msg_.motor_cmd()[i].tau() = 0;
+            }
         }
 
         //Calling reset to avoid initial joint target positions being set to zero, which can cause a large initial torque spike.
@@ -39,6 +41,9 @@ public:
         safety_tau_over_count_ = 0;
         // Open the CSV before the policy thread begins producing samples.
         open_data_log();
+        // Is the policy control enabled?
+        spdlog::warn("Policy control enabled: {}", policy_control_enabled_);
+        
         // Start policy thread
         policy_thread_running = true;
         policy_thread = std::thread([this]{
@@ -164,6 +169,7 @@ private:
     std::vector<float> safety_tau_max_;
     int safety_tau_debounce_ticks_ = 0;
     int safety_tau_over_count_ = 0;
+    bool policy_control_enabled_ = true;
 
 };
 
