@@ -8,9 +8,9 @@ FSM:
       id: 3
       type: RLBase
 
-    Mimic_Dance1_subject2:
-      id: 5
-      type: Mimic
+    # Mimic_Dance1_subject2:
+    #   id: 5
+    #   type: Mimic
 
 
   Passive:
@@ -26,11 +26,11 @@ FSM:
     kd: [
       3,3,3,3,3,3,
       3,3,3,3,3,3,
-      3,3,3,
+      3,0,0, # waist roll/pitch (13,14) mechanically locked: unpowered
       3,3,3,3,3,3,3,  
       3,3,3,3,3,3,3,  
     ]
-
+  
 
   FixStand:
     transitions: 
@@ -40,14 +40,14 @@ FSM:
     kp: [
       100,100,100,150,40,40,
       100,100,100,150,40,40,
-      200,200,200,
+      200,0,0, # waist roll/pitch (13,14) mechanically locked: unpowered
       40,40,40,40,40,40,40,
       40,40,40,40,40,40,40,
     ]
     kd: [
       2,2,2,4,2,2,
       2,2,2,4,2,2,
-      5,5,5,
+      5,0,0,
       10,10,10,10,10,10,10,
       10,10,10,10,10,10,10,
     ]
@@ -66,9 +66,9 @@ FSM:
   Velocity:
     transitions: 
       Passive: LT + B.on_pressed
-      Mimic_Dance1_subject2: RB + A.on_pressed
+      # Mimic_Dance1_subject2: RB + A.on_pressed
 
-    policy_dir: config/policy/velocity
+    policy_dir: config/policy/velocity/v1_27dof
 
     data_log:
       enabled: true
@@ -105,7 +105,7 @@ FSM:
                 22.5, 22.5, 22.5, 22.5, 22.5, 4.5, 4.5]
       # tau_est is noisy and spikes on foot impacts; only sustained torque trips.
       # CtrlFSM runs at 1 kHz, so 1 tick = 1 ms.
-      tau_debounce_ms: 20
+      tau_debounce_ms: 10
 
 
 

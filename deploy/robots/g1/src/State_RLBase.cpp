@@ -73,11 +73,13 @@ State_RLBase::State_RLBase(int state_mode, std::string state_string)
         safety_tau_debounce_ticks_ = safety_cfg["tau_debounce_ms"].as<int>();
 
         // A short table would silently leave joints unchecked; fail before the robot moves.
-        const auto joint_count = env->robot->data.joint_ids_map.size();
-        if (safety_q_min_.size() != joint_count || safety_q_max_.size() != joint_count ||
-            safety_dq_max_.size() != joint_count || safety_tau_max_.size() != joint_count) {
-            throw std::runtime_error("safety: each limit array needs one entry per joint");
+        // Limits are per physical motor (SDK order), independent of the policy.
+        constexpr std::size_t kNumMotors = 29;  // G1 motor slots
+        if (safety_q_min_.size() != kNumMotors || safety_q_max_.size() != kNumMotors ||
+            safety_dq_max_.size() != kNumMotors || safety_tau_max_.size() != kNumMotors) {
+            throw std::runtime_error("safety: each limit array needs one entry per motor (29)");
         }
+
 
         // Front of the list: a limit violation must win over any joystick transition.
         registered_checks.emplace(

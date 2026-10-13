@@ -18,13 +18,21 @@ public:
     void enter()
     {
         // set gain
-        if(policy_control_enabled_){
-            for (int i = 0; i < env->robot->data.joint_stiffness.size(); ++i)
-            {
-                lowcmd->msg_.motor_cmd()[i].kp() = env->robot->data.joint_stiffness[i];
-                lowcmd->msg_.motor_cmd()[i].kd() = env->robot->data.joint_damping[i];
-                lowcmd->msg_.motor_cmd()[i].dq() = 0;
-                lowcmd->msg_.motor_cmd()[i].tau() = 0;
+        if (policy_control_enabled_) {
+            // Unpower every motor first: motors the policy does not control
+            // (waist roll/pitch, locked on our G1) stay at kp = kd = 0.
+            for (auto& motor : lowcmd->msg_.motor_cmd()) {
+                motor.kp() = 0;
+                motor.kd() = 0;
+                motor.dq() = 0;
+                motor.tau() = 0;
+            }
+            // Policy joint i drives SDK motor joint_ids_map[i].
+            const auto& ids = env->robot->data.joint_ids_map;
+            for (std::size_t i = 0; i < ids.size(); ++i) {
+                auto& motor = lowcmd->msg_.motor_cmd()[static_cast<int>(ids[i])];
+                motor.kp() = env->robot->data.joint_stiffness[i];
+                motor.kd() = env->robot->data.joint_damping[i];
             }
         }
 

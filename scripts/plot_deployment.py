@@ -11,8 +11,6 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 
-JOINT_COUNT = 29
-
 # Must match the deployment policy joint_ids_map: [0, ..., 28].
 # This is the same canonical order used by evaluate_policy.py.
 G1_JOINT_NAMES = [
@@ -47,11 +45,6 @@ G1_JOINT_NAMES = [
     "right_wrist_yaw_joint",
 ]
 
-JOINT_GROUPS = {
-    "Lower body": list(range(0, 12)),
-    "Waist": list(range(12, 15)),
-    "Arms": list(range(15, 29)),
-}
 
 REQUIRED_BASE_COLUMNS = [
     "timestep",
@@ -68,24 +61,50 @@ REQUIRED_BASE_COLUMNS = [
     "imu_quat_z",
 ]
 
-def joint_columns(prefix: str) -> list[str]:
-    """Return the expected 29 joint columns in policy-joint order."""
-    return [f"{prefix}_{index}" for index in range(JOINT_COUNT)]
+# 27-DoF policy: waist roll/pitch are mechanically locked and not policy joints.
+G1_27DOF_JOINT_NAMES = [
+    name for name in G1_JOINT_NAMES
+    if name not in ("waist_roll_joint", "waist_pitch_joint")
+]
+JOINT_NAMES_BY_COUNT = {29: G1_JOINT_NAMES, 27: G1_27DOF_JOINT_NAMES}
 
 
-def load_deployment_log(csv_file: Path) -> pd.DataFrame:
+def joint_groups(joint_names: list[str]) -> dict[str, list[int]]:
+    """Group policy-joint indices by body part, using joint names."""
+    groups = {"Lower body": [], "Waist": [], "Arms": []}
+    for index, name in enumerate(joint_names):
+        if name.startswith("waist"):
+            groups["Waist"].append(index)
+        elif any(part in name for part in ("shoulder", "elbow", "wrist")):
+            groups["Arms"].append(index)
+        else:
+            groups["Lower body"].append(index)
+    return groups
+
+
+
+def joint_columns(prefix: str, joint_count: int) -> list[str]:
+    """Return the expected joint columns in policy-joint order."""
+    return [f"{prefix}_{index}" for index in range(joint_count)]
+
+
+def load_deployment_log(csv_file: Path) -> tuple[pd.DataFrame, list[str]]:
     """Load one deployment CSV and reject incomplete or invalid logs."""
     if not csv_file.is_file():
         raise FileNotFoundError(f"Deployment CSV not found: {csv_file}")
 
     data = pd.read_csv(csv_file)
+    
+    joint_count = sum(column.startswith("joint_pos_") for column in data.columns)
+    if joint_count not in JOINT_NAMES_BY_COUNT:
+        raise ValueError(f"Unsupported joint count {joint_count}; expected 29 or 27.")
 
     required_columns = [
         *REQUIRED_BASE_COLUMNS,
-        *joint_columns("joint_pos"),
-        *joint_columns("joint_vel"),
-        *joint_columns("joint_tau_est"),
-        *joint_columns("target_joint_pos"),
+        *joint_columns("joint_pos", joint_count),
+        *joint_columns("joint_vel", joint_count),
+        *joint_columns("joint_tau_est", joint_count),
+        *joint_columns("target_joint_pos", joint_count),
     ]
     missing_columns = [
         column for column in required_columns if column not in data.columns
@@ -102,7 +121,7 @@ def load_deployment_log(csv_file: Path) -> pd.DataFrame:
     if not data["timestep"].is_monotonic_increasing:
         raise ValueError("CSV timestep must be monotonically increasing.")
 
-    return data
+    return data,  JOINT_NAMES_BY_COUNT[joint_count]
 
 def sample_period_summary(data: pd.DataFrame) -> dict[str, float]:
     """Summarize the observed interval between logged policy samples."""
@@ -243,6 +262,7 @@ def joint_figure(
     group_name: str,
     joint_indices: list[int],
     data: pd.DataFrame,
+    joint_names: list[str]
 ) -> go.Figure:
     """Plot actual/target position, velocity, and torque estimate per joint."""
     fig = make_subplots(
@@ -260,7 +280,7 @@ def joint_figure(
     time_s = data["timestep"]
 
     for row, joint_index in enumerate(joint_indices, start=1):
-        joint_name = G1_JOINT_NAMES[joint_index]
+        joint_name = joint_names[joint_index]
 
         fig.add_trace(
             go.Scatter(
@@ -336,7 +356,7 @@ def main() -> None:
         
     args = parser.parse_args()
 
-    data = load_deployment_log(args.csv_file)
+    data, joint_names = load_deployment_log(args.csv_file)
     duration_s = data["timestep"].iloc[-1] - data["timestep"].iloc[0]
     timing = sample_period_summary(data)
 
@@ -347,8 +367,8 @@ def main() -> None:
         command_and_yaw_figure(data),
         imu_figure(data),
         *[
-            joint_figure(group_name, indices, data)
-            for group_name, indices in JOINT_GROUPS.items()
+            joint_figure(group_name, indices, data, joint_names)
+            for group_name, indices in joint_groups(joint_names).items()
         ],
     ]
     html = [
