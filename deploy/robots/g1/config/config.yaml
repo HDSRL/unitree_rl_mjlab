@@ -106,6 +106,9 @@ FSM:
       # tau_est is noisy and spikes on foot impacts; only sustained torque trips.
       # CtrlFSM runs at 1 kHz, so 1 tick = 1 ms.
       tau_debounce_ms: 10
+      # Tilt from vertical (roll+pitch combined); sim walking peaks ~8 deg.
+      max_tilt_deg: 15
+
 
 
 

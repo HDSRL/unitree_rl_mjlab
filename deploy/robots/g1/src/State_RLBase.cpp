@@ -71,6 +71,10 @@ State_RLBase::State_RLBase(int state_mode, std::string state_string)
         safety_dq_max_ = safety_cfg["dq_max"].as<std::vector<float>>();
         safety_tau_max_ = safety_cfg["tau_max"].as<std::vector<float>>();
         safety_tau_debounce_ticks_ = safety_cfg["tau_debounce_ms"].as<int>();
+        // Compare cosines so the 1 kHz check needs no acos.
+        safety_min_cos_tilt_ =
+            std::cos(safety_cfg["max_tilt_deg"].as<float>() * static_cast<float>(M_PI) / 180.0f);
+
 
         // A short table would silently leave joints unchecked; fail before the robot moves.
         // Limits are per physical motor (SDK order), independent of the policy.
@@ -348,6 +352,16 @@ bool State_RLBase::safety_limits_exceeded()
             tau_motor = static_cast<int>(m);
         }
     }
+
+    // Tilt from vertical, from the IMU quaternion (w, x, y, z): cos(tilt) = 1 - 2(x^2 + y^2).
+    const auto& quat = FSMState::lowstate->msg_.imu_state().quaternion();
+    const float cos_tilt = 1.0f - 2.0f * (quat[1] * quat[1] + quat[2] * quat[2]);
+    if (!(cos_tilt >= safety_min_cos_tilt_)) {
+        spdlog::critical("SAFETY: tilt {:.1f} deg exceeds limit -> Passive",
+                         std::acos(std::clamp(cos_tilt, -1.0f, 1.0f)) * 180.0f / static_cast<float>(M_PI));
+        return true;
+    }
+
 
     // Only sustained torque trips; single-tick spikes reset the count.
     safety_tau_over_count_ = (tau_motor >= 0) ? safety_tau_over_count_ + 1 : 0;

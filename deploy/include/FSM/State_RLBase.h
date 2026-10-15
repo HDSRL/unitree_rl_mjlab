@@ -178,6 +178,7 @@ private:
     int safety_tau_debounce_ticks_ = 0;
     int safety_tau_over_count_ = 0;
     bool policy_control_enabled_ = true;
+    float safety_min_cos_tilt_ = -1.0f;  // disabled
 
 };
 
