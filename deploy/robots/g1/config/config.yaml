@@ -74,7 +74,10 @@ FSM:
       enabled: true
       output_dir: log/deployment
     
-    policy_control_enabled: false
+    policy_control_enabled: true
+    entry_blend_steps: 20   # ramp FixStand pose -> policy targets over 20 policy steps; 0 = off
+
+
 
     safety:
       enabled: true

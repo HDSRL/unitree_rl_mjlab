@@ -16,7 +16,17 @@ public:
     State_RLBase(int state_mode, std::string state_string);
     
     void enter()
-    {
+    {   
+        // Blend start pose: the targets FixStand was holding.
+        {
+            const auto& ids = env->robot->data.joint_ids_map;
+            blend_start_q_.resize(ids.size());
+            for (std::size_t i = 0; i < ids.size(); ++i) {
+                blend_start_q_[i] = lowcmd->msg_.motor_cmd()[static_cast<int>(ids[i])].q();
+            }
+            blend_ticks_ = 0;
+        }
+
         // set gain
         if (policy_control_enabled_) {
             // Unpower every motor first: motors the policy does not control
@@ -179,6 +189,10 @@ private:
     int safety_tau_over_count_ = 0;
     bool policy_control_enabled_ = true;
     float safety_min_cos_tilt_ = -1.0f;  // disabled
+    // Entry blend from the FixStand pose to the policy's targets (FSM thread only).
+    std::vector<float> blend_start_q_;
+    int blend_ticks_ = 0;
+    int blend_total_ticks_ = 0;  // 0 = no blend
 
 };
 

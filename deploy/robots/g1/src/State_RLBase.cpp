@@ -97,6 +97,12 @@ State_RLBase::State_RLBase(int state_mode, std::string state_string)
 
     //check for policy control enable or disable
     policy_control_enabled_ = cfg["policy_control_enabled"].as<bool>();
+    // Entry blend length in policy steps; CtrlFSM runs at 1 kHz (1 tick = 1 ms).
+    if (cfg["entry_blend_steps"]) {
+        const float blend_s = cfg["entry_blend_steps"].as<int>() * env->step_dt;
+        blend_total_ticks_ = static_cast<int>(std::lround(blend_s * 1000.0f));
+    }
+    spdlog::info("Entry blend: {} ms", blend_total_ticks_);
 
     this->registered_checks.emplace_back(
         std::make_pair(
@@ -112,9 +118,18 @@ void State_RLBase::run()
         return;
     }
     auto action = env->action_manager->processed_actions();
-    for(int i(0); i < env->robot->data.joint_ids_map.size(); i++) {
-        lowcmd->msg_.motor_cmd()[env->robot->data.joint_ids_map[i]].q() = action[i];
+    // Entry blend: alpha rises from 0 to 1 over blend_total_ticks_ FSM ticks.
+    float alpha = 1.0f;
+    if (blend_ticks_ < blend_total_ticks_) {
+        alpha = static_cast<float>(blend_ticks_) / static_cast<float>(blend_total_ticks_);
+        ++blend_ticks_;
     }
+    const auto& ids = env->robot->data.joint_ids_map;
+    for (std::size_t i = 0; i < ids.size(); ++i) {
+        const float q_target = blend_start_q_[i] + alpha * (action[i] - blend_start_q_[i]);
+        lowcmd->msg_.motor_cmd()[static_cast<int>(ids[i])].q() = q_target;
+    }
+
 }
 
 void State_RLBase::open_data_log()
