@@ -74,7 +74,7 @@ FSM:
       enabled: true
       output_dir: log/deployment
     
-    policy_control_enabled: true
+    policy_control_enabled: false
 
     safety:
       enabled: true

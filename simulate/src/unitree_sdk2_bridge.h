@@ -265,7 +265,9 @@ public:
             auto* g1_lowstate = dynamic_cast<unitree::robot::g1::publisher::LowState*>(lowstate.get());
             if (g1_lowstate) {
                 auto scene = param::config.robot_scene.filename().string();
-                g1_lowstate->msg_.mode_machine() = scene.find("23") != std::string::npos ? 4 : 5;
+                g1_lowstate->msg_.mode_machine() = scene.find("23") != std::string::npos ? 4
+                                 : scene.find("27") != std::string::npos ? 6 : 5;
+
             }
         }
 
