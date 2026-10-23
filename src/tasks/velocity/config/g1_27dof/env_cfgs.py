@@ -14,6 +14,13 @@ from mjlab.tasks.velocity import mdp
 from mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg
 from src.tasks.velocity.velocity_env_cfg import make_velocity_env_cfg
 
+from mjlab.managers.observation_manager import ObservationTermCfg
+from src import SRC_PATH
+from src.tasks.velocity.mdp.hand_command import HandPositionCommandCfg
+from src.tasks.velocity.mdp.hand_command import HandPositionCommandCfg, track_hand_position
+
+HAND_TARGETS_PATH = SRC_PATH / "assets/robots/unitree_g1/hand_targets_27dof.pt"
+
 
 def unitree_g1_27dof_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   """Create Unitree G1 rough terrain velocity configuration."""
@@ -191,5 +198,64 @@ def unitree_g1_27dof_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     twist_cmd.ranges.lin_vel_x = (-0.5, 1.0)
     twist_cmd.ranges.lin_vel_y = (-0.5, 0.5)
     twist_cmd.ranges.ang_vel_z = (-0.5, 0.5)
+
+  return cfg
+
+def unitree_g1_27dof_hands_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+  """Flat velocity task plus palm position tracking (v0: position only)."""
+  cfg = unitree_g1_27dof_flat_env_cfg(play=play)
+
+  cfg.commands["hands"] = HandPositionCommandCfg(
+    entity_name="robot",
+    resampling_time_range=(2.0, 4.0),
+    library_path=str(HAND_TARGETS_PATH),
+    max_speed=0.5,
+    debug_vis=True,
+  )
+  # Appended last, so the deploy obs layout only grows at the end.
+  for group in ("actor", "critic"):
+    cfg.observations[group].terms["hand_command"] = ObservationTermCfg(
+      func=envs_mdp.generated_commands, params={"command_name": "hands"}
+    )
+
+  # Walking speeds for manipulation (ResGAC uses up to 0.7), and more standing.
+  # The velocity curriculum is removed: it would widen these ranges up to 2 m/s.
+  twist_cmd = cfg.commands["twist"]
+  assert isinstance(twist_cmd, UniformVelocityCommandCfg)
+  twist_cmd.rel_standing_envs = 0.3
+  twist_cmd.ranges.lin_vel_x = (-0.5, 0.8)
+  twist_cmd.ranges.lin_vel_y = (-0.4, 0.4)
+  twist_cmd.ranges.ang_vel_z = (-0.8, 0.8)
+  cfg.curriculum.pop("command_vel", None)
+
+  # Hand tracking: the coarse kernel pulls from far away, the fine one sharpens.
+  # Total weight 2.0 = 2x velocity tracking, a similar ratio to ResGAC.
+  cfg.rewards["track_hands"] = RewardTermCfg(
+    func=track_hand_position,
+    weight=1.0,
+    params={"command_name": "hands", "std": 0.1},
+  )
+  cfg.rewards["track_hands_fine"] = RewardTermCfg(
+    func=track_hand_position,
+    weight=1.0,
+    params={"command_name": "hands", "std": 0.03},
+  )
+
+  # Arms are free now: only legs and waist must stay still when standing.
+  cfg.rewards["stand_still"].params["asset_cfg"].joint_names = (
+    r".*_hip_.*", r".*_knee_.*", r".*_ankle_.*", r"waist_.*",
+  )
+
+  # Arms must reach targets now: keep only a weak pull toward the default pose.
+  ARM_STD = 1.0
+  cfg.rewards["pose"].params["std_standing"] = {
+    r".*_hip_.*": 0.05, r".*_knee_.*": 0.05, r".*_ankle_.*": 0.05, r"waist_.*": 0.05,
+    r".*_shoulder_.*": ARM_STD, r".*_elbow_.*": ARM_STD, r".*_wrist_.*": ARM_STD,
+  }
+  for regime in ("std_walking", "std_running"):
+    stds = cfg.rewards["pose"].params[regime]
+    for key in stds:
+      if any(part in key for part in ("shoulder", "elbow", "wrist")):
+        stds[key] = ARM_STD
 
   return cfg

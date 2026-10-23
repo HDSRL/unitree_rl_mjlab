@@ -44,3 +44,9 @@ def unitree_g1_27dof_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
     num_steps_per_env=24,
     max_iterations=10001,
   )
+
+def unitree_g1_27dof_hands_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
+  """Same PPO settings as velocity, separate log folder."""
+  cfg = unitree_g1_27dof_ppo_runner_cfg()
+  cfg.experiment_name = "g1_27dof_hands"
+  return cfg
