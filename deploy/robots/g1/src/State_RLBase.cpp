@@ -197,6 +197,20 @@ void State_RLBase::open_data_log()
             data_log_file_ << ",target_joint_pos_" << index;
         }
 
+        //Add header for mocap packets
+        for (std::size_t body_index = 0; body_index < NumMocapBodiesPerAgent; ++body_index) {
+            data_log_file_ << ",mocap_packet_" << body_index << "_id";
+            data_log_file_ << ",mocap_packet_" << body_index << "_seq";
+            data_log_file_ << ",mocap_packet_" << body_index << "_timestamp";
+            data_log_file_ << ",mocap_packet_" << body_index << "_pos_x";
+            data_log_file_ << ",mocap_packet_" << body_index << "_pos_y";
+            data_log_file_ << ",mocap_packet_" << body_index << "_pos_z";
+            data_log_file_ << ",mocap_packet_" << body_index << "_quat_w";
+            data_log_file_ << ",mocap_packet_" << body_index << "_quat_x";
+            data_log_file_ << ",mocap_packet_" << body_index << "_quat_y";
+            data_log_file_ << ",mocap_packet_" << body_index << "_quat_z";
+        }
+
         data_log_file_ << '\n';
 
         // steady_clock is monotonic, so it is correct for timing plots.
@@ -269,6 +283,12 @@ void State_RLBase::write_data_log_sample()
             joint_tau_est[index] = motor_state[motor_id].tau_est();
         }
     }
+    //Copy the Mocap packets from the shared mocap data structure
+    std::array<UdpPacket, NumMocapBodiesPerAgent> mocap_packets{};
+    {
+        std::lock_guard<std::mutex> lock(FSMState::mocap_data->mutex_);
+        mocap_packets = FSMState::mocap_data->packets;
+    }
 
     // This is intentionally the same mapping as velocity_commands() in
     // observations.h, using the exact joystick snapshot recorded above.
@@ -324,6 +344,21 @@ void State_RLBase::write_data_log_sample()
     for (const float value : target_joint_pos) {
         data_log_file_ << ',' << value;
     }
+
+    for (const UdpPacket& pkt : mocap_packets) {
+        data_log_file_ << ','
+                       << pkt.id << ','
+                       << pkt.seq << ','
+                       << pkt.t << ','
+                       << pkt.px << ','
+                       << pkt.py << ','
+                       << pkt.pz << ','
+                       << pkt.qw << ','
+                       << pkt.qx << ','
+                       << pkt.qy << ','
+                       << pkt.qz;
+    }
+
 
     data_log_file_ << '\n';
 }
