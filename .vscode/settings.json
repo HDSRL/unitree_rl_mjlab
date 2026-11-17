@@ -1,3 +1,5 @@
 {
-    "cmake.sourceDirectory": "/home/trec/WorkRaj/Humanoid_Locomanipulation/unitree_rl_mjlab/simulate"
+    "cmake.sourceDirectory": "/home/trec/WorkRaj/Humanoid_Locomanipulation/unitree_rl_mjlab/simulate",
+    "python-envs.defaultEnvManager": "ms-python.python:conda",
+    "python-envs.defaultPackageManager": "ms-python.python:conda"
 }

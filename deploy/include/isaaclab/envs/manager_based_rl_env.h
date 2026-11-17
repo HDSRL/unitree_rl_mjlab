@@ -50,10 +50,13 @@ public:
     void reset()
     {
         global_phase = 0;
+        hand_goal.clear(); // empty = "start from the default on the next hand_command call"
+        hand_target.clear();
         episode_length = 0;
         robot->update();
         action_manager->reset();
         observation_manager->reset();
+        
     }
 
     void step()
@@ -75,6 +78,8 @@ public:
     std::unique_ptr<Algorithms> alg;
     long episode_length = 0;
     float global_phase = 0.0f;
+    std::vector<float> hand_goal; //set by buttons now; VIVE/MPC later  
+    std::vector<float> hand_target; //what the policy sees, glides towards hand_goal
 };
 
 };
