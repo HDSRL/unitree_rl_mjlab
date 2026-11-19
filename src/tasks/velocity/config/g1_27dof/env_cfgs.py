@@ -1,4 +1,5 @@
 """Unitree G1 velocity environment configurations."""
+from dataclasses import replace
 
 from src.assets.robots import (
   G1_27DOF_ACTION_SCALE,
@@ -246,16 +247,34 @@ def unitree_g1_27dof_hands_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnv
     r".*_hip_.*", r".*_knee_.*", r".*_ankle_.*", r"waist_.*",
   )
 
-  # Arms must reach targets now: keep only a weak pull toward the default pose.
-  ARM_STD = 1.0
+  # v0.5: arms must reach targets but keep a natural, symmetric posture.
+  # v0 used 1.0 rad for every arm joint and drifted into contorted,
+  # asymmetric poses. Wrists barely move the palm, so they get the tightest pull.
+  ARM_STD, WRIST_STD = 0.5, 0.3
+  # Dict keys are regex patterns matched against joint names. Each joint must
+  # match exactly ONE key, otherwise mjlab raises a ValueError. So replace
+  # entries instead of adding overlapping ones.
   cfg.rewards["pose"].params["std_standing"] = {
     r".*_hip_.*": 0.05, r".*_knee_.*": 0.05, r".*_ankle_.*": 0.05, r"waist_.*": 0.05,
-    r".*_shoulder_.*": ARM_STD, r".*_elbow_.*": ARM_STD, r".*_wrist_.*": ARM_STD,
+    r".*_shoulder_.*": ARM_STD, r".*_elbow_.*": ARM_STD, r".*_wrist_.*": WRIST_STD,
   }
   for regime in ("std_walking", "std_running"):
     stds = cfg.rewards["pose"].params[regime]
     for key in stds:
-      if any(part in key for part in ("shoulder", "elbow", "wrist")):
+      if "wrist" in key:
+        stds[key] = WRIST_STD
+      elif "shoulder" in key or "elbow" in key:
         stds[key] = ARM_STD
+
+  # Joint-limit penalty starts at 85% of range, leaving a margin before the
+  # deploy safety trip at 90%.
+  # Why replace(): in Python, `a = b` makes both names point to ONE object.
+  # robot.articulation IS the module-level G1_27DOF_ARTICULATION, shared by
+  # every G1-27DoF task, so editing it in place would also change the
+  # locomotion task. replace() builds a modified copy and leaves the shared
+  # one untouched.
+  robot = cfg.scene.entities["robot"]
+  robot.articulation = replace(robot.articulation, soft_joint_pos_limit_factor=0.85)
+
 
   return cfg

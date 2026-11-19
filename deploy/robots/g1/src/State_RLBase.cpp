@@ -11,6 +11,7 @@
 #include <array>
 #include <mutex>
 #include <cmath>
+#include <limits>
 namespace isaaclab
 {
 // keyboard velocity commands example
@@ -197,6 +198,17 @@ void State_RLBase::open_data_log()
             data_log_file_ << ",target_joint_pos_" << index;
         }
 
+        // Hand command in the heading frame [m]. goal = what the button asked for,
+        // target = what the policy saw this step (glides toward goal). Needed to
+        // measure palm tracking error offline. Always 12 columns, so CSVs from
+        // every policy (even ones without hands) have the same layout.
+        for (const char* kind : {"hand_goal", "hand_target"}) {
+            for (const char* name : {"Lx", "Ly", "Lz", "Rx", "Ry", "Rz"}) {
+                data_log_file_ << ',' << kind << '_' << name;
+            }
+        }
+
+
         data_log_file_ << '\n';
 
         // steady_clock is monotonic, so it is correct for timing plots.
@@ -312,7 +324,7 @@ void State_RLBase::write_data_log_sample()
     for (const float value : joint_pos) {
         data_log_file_ << ',' << value;
     }
-
+    
     for (const float value : joint_vel) {
         data_log_file_ << ',' << value;
     }
@@ -324,6 +336,19 @@ void State_RLBase::write_data_log_sample()
     for (const float value : target_joint_pos) {
         data_log_file_ << ',' << value;
     }
+
+    // Policies without hand_command leave these vectors empty: write NaN
+    // ("no data") instead of skipping, so columns never shift.
+    // Safe to read here: this runs in the policy thread right after env->step(),
+    // the same thread that updates hand_target, so there is no data race.
+    for (const auto* vec : {&env->hand_goal, &env->hand_target}) {
+        for (std::size_t i = 0; i < 6; ++i) {
+            data_log_file_ << ','
+                           << (i < vec->size() ? (*vec)[i] : std::numeric_limits<float>::quiet_NaN());
+        }
+    }
+
+
 
     data_log_file_ << '\n';
 }

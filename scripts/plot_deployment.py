@@ -337,6 +337,145 @@ def joint_figure(
     )
     return fig
 
+# Adding hand plotting
+HAND_AXES = ("Lx", "Ly", "Lz", "Rx", "Ry", "Rz")
+G1_27DOF_XML = Path("src/assets/robots/unitree_g1/xmls/g1_27dof.xml")
+
+
+def has_hand_data(data: pd.DataFrame) -> bool:
+    """True if this log came from a hands policy.
+
+    Every log has the hand_* columns, but non-hands policies write NaN there,
+    so check for real values, not just for the column names.
+    """
+    columns = [f"hand_target_{axis}" for axis in HAND_AXES]
+    return all(c in data.columns for c in columns) and bool(data[columns].notna().all(axis=1).any())
+
+
+def actual_palm_positions(
+    data: pd.DataFrame, joint_count: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Palm positions in the heading frame from logged joints + IMU, and pelvis tilt.
+
+    The heading frame removes only the pelvis yaw (same frame as the policy's
+    hand command), so the IMU roll/pitch is applied in the forward kinematics.
+    Pelvis height is not logged: it is estimated by assuming the lower foot
+    stands on flat ground.
+    """
+    import mujoco  # Imported here so reports for velocity-only logs don't need MuJoCo.
+
+    model = mujoco.MjModel.from_xml_path(str(G1_27DOF_XML))
+    mj_data = mujoco.MjData(model)
+
+    def site_id(name: str) -> int:
+        return mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, name)
+
+    palms = [site_id("left_palm"), site_id("right_palm")]
+    feet = [site_id("left_foot"), site_id("right_foot")]
+
+    # Height of the foot site above the ground in the default stance (pelvis at 0.79 m).
+    mj_data.qpos[:] = model.qpos0
+    mj_data.qpos[2] = 0.79
+    mujoco.mj_kinematics(model, mj_data)
+    foot_height = mj_data.site_xpos[feet, 2].min()
+
+    joints = data[joint_columns("joint_pos", joint_count)].to_numpy()
+    quats = data[["imu_quat_w", "imu_quat_x", "imu_quat_y", "imu_quat_z"]].to_numpy()
+    palm_pos = np.zeros((len(data), 6))
+    tilt_deg = np.zeros(len(data))
+    rot = np.zeros(9)
+    quat_no_yaw = np.zeros(4)
+    for k in range(len(data)):
+        mujoco.mju_quat2Mat(rot, quats[k])
+        r = rot.reshape(3, 3)
+        # Remove yaw: rotate back by the pelvis heading, keep roll and pitch.
+        yaw = np.arctan2(r[1, 0], r[0, 0])
+        c, s = np.cos(-yaw), np.sin(-yaw)
+        r_no_yaw = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]]) @ r
+        mujoco.mju_mat2Quat(quat_no_yaw, r_no_yaw.reshape(-1))
+
+        mj_data.qpos[:3] = 0.0  # pelvis at the origin; height added below
+        mj_data.qpos[3:7] = quat_no_yaw
+        mj_data.qpos[7:7 + joint_count] = joints[k]
+        mujoco.mj_kinematics(model, mj_data)
+        pelvis_height = foot_height - mj_data.site_xpos[feet, 2].min()
+        palm_pos[k] = (mj_data.site_xpos[palms] + [0.0, 0.0, pelvis_height]).reshape(-1)
+        # Tilt = angle between the pelvis z-axis and vertical.
+        tilt_deg[k] = np.degrees(np.arccos(np.clip(r_no_yaw[2, 2], -1.0, 1.0)))
+    return palm_pos, tilt_deg
+
+
+def hand_tracking_figure(data: pd.DataFrame, joint_count: int) -> go.Figure:
+    """Commanded vs actual palm position per hand and axis, error, and pelvis tilt."""
+    time_s = data["timestep"]
+    goal = data[[f"hand_goal_{axis}" for axis in HAND_AXES]].to_numpy()
+    target = data[[f"hand_target_{axis}" for axis in HAND_AXES]].to_numpy()
+    actual, tilt_deg = actual_palm_positions(data, joint_count)
+    error_cm = 100.0 * np.stack(
+        [np.linalg.norm(actual[:, 3 * h:3 * h + 3] - target[:, 3 * h:3 * h + 3], axis=1)
+         for h in (0, 1)],
+        axis=1,
+    )
+
+    fig = make_subplots(
+        rows=5,
+        cols=2,
+        shared_xaxes=True,
+        vertical_spacing=0.05,
+        horizontal_spacing=0.08,
+        # Last row: one wide tilt plot across both columns.
+        specs=[[{}, {}]] * 4 + [[{"colspan": 2}, None]],
+        subplot_titles=[
+            "Left palm x", "Right palm x",
+            "Left palm y", "Right palm y",
+            "Left palm z", "Right palm z",
+            "Left tracking error", "Right tracking error",
+            "Pelvis tilt",
+        ],
+    )
+    series = [  # (label, data, line style); colors match across all panels
+        ("button goal", goal, dict(color="#52514e", width=1, dash="dash")),
+        ("commanded target (policy input)", target, dict(color="#2a78d6", width=2)),
+        ("actual palm (FK + IMU)", actual, dict(color="#eb6834", width=2)),
+    ]
+    for hand in range(2):
+        for axis in range(3):
+            column = 3 * hand + axis
+            for label, values, line in series:
+                fig.add_trace(
+                    go.Scatter(
+                        x=time_s, y=values[:, column], name=label, line=line,
+                        legendgroup=label,
+                        showlegend=(hand == 0 and axis == 0),  # one legend entry per series
+                    ),
+                    row=axis + 1, col=hand + 1,
+                )
+            fig.update_yaxes(title_text=f"{'xyz'[axis]} [m]", row=axis + 1, col=hand + 1)
+        fig.add_trace(
+            go.Scatter(x=time_s, y=error_cm[:, hand], name="tracking error",
+                       showlegend=False, line=dict(color="#0b0b0b", width=1.5)),
+            row=4, col=hand + 1,
+        )
+        fig.update_yaxes(title_text="error [cm]", row=4, col=hand + 1)
+
+    fig.add_trace(
+        go.Scatter(x=time_s, y=tilt_deg, name="pelvis tilt", showlegend=False,
+                   line=dict(color="#0b0b0b", width=1.5)),
+        row=5, col=1,
+    )
+    fig.add_hline(y=15.0, line=dict(color="#52514e", width=1, dash="dash"),
+                  annotation_text="safety trip 15°", row=5, col=1)
+    fig.update_yaxes(title_text="tilt [deg]", row=5, col=1)
+    fig.update_xaxes(title_text="time [s]", row=5, col=1)
+    fig.update_layout(
+        title="Hand tracking (heading frame; actual = FK from logged joints + IMU)",
+        height=1300,
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+    )
+    return fig
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Load and validate a G1 deployment CSV log."
@@ -371,6 +510,10 @@ def main() -> None:
             for group_name, indices in joint_groups(joint_names).items()
         ],
     ]
+    # Hands policies log their hand command; add the tracking section only then.
+    if len(joint_names) == 27 and has_hand_data(data):
+        figures.append(hand_tracking_figure(data, len(joint_names)))
+
     html = [
         "<!DOCTYPE html><html><head><meta charset='utf-8'>",
         "<title>G1 Deployment Report</title></head><body>",
