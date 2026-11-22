@@ -50,3 +50,13 @@ def unitree_g1_27dof_hands_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
   cfg = unitree_g1_27dof_ppo_runner_cfg()
   cfg.experiment_name = "g1_27dof_hands"
   return cfg
+
+
+def unitree_g1_27dof_hands_pose_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
+  """v1 hands pose task: same PPO settings, own log folder, longer training."""
+  cfg = unitree_g1_27dof_ppo_runner_cfg()
+  cfg.experiment_name = "g1_27dof_hands_pose"
+  # Orientation is harder to learn than position: train 15k iterations (~6 h)
+  # instead of 10k. The extra 1 makes the last checkpoint model_15000.pt.
+  cfg.max_iterations = 15001
+  return cfg

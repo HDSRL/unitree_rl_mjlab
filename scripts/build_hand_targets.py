@@ -1,26 +1,34 @@
-"""Build a library of reachable palm targets for the G1 27-DoF (offline, CPU).
+"""Build a library of reachable palm POSES (position + orientation) for the G1 27-DoF.
 
-What this script does, in plain words:
+Offline, CPU only. What this script does, in plain words:
   1. Put the robot model in its default standing pose.
   2. Many times: pick random angles for the 14 arm joints (7 per arm).
-  3. Compute where the two palms end up (forward kinematics).
+  3. Compute where the two palms end up AND how they are rotated
+     (forward kinematics).
   4. Throw the sample away if an arm touches the body or the other arm,
      or if the palms are outside the front "manipulation workspace".
-  5. Save the surviving palm positions. Training samples hand goals from them,
-     so every goal is reachable without self-collision.
+  5. Save the surviving palm poses. Training samples hand goals from them,
+     so every goal (position and orientation) is reachable without
+     self-collision.
 
-Why sample joint angles instead of palm positions directly? A random palm
-position may be unreachable; a palm position computed FROM joint angles is
-reachable by construction.
+Why sample joint angles instead of palm poses directly? A random palm pose may
+be unreachable; a palm pose computed FROM joint angles is reachable by
+construction.
 
-Frame of the saved positions: the ground-attached heading frame. The pelvis is
-at x = y = 0 and faces +x with no yaw, z is height above the floor.
+Frame of the saved poses: the ground-attached heading frame. The pelvis is at
+x = y = 0 and faces +x with no yaw, z is height above the floor.
 
 Output file (a dict saved with torch.save):
-  "targets": (N, 6) float32, each row = [left x, y, z, right x, y, z] in metres
-  "default": (6,)   float32, palm positions in the default pose (reset target)
+  "targets":        (N, 6)       float32, [left x, y, z, right x, y, z] in metres
+  "targets_rotmat": (N, 2, 3, 3) float32, rotation matrix of [left, right] palm
+  "default":        (6,)         float32, palm positions in the default pose
+  "default_rotmat": (2, 3, 3)    float32, palm rotations in the default pose
 
-Run from the repo root:  python scripts/build_hand_targets.py   (~40 s)
+History: v0 and v0.5 were trained on hand_targets_27dof.pt (positions only,
+all arm joints sampled within 80% of their range), made by this script at
+commit 6aa2261.
+
+Run from the repo root:  python scripts/build_hand_targets.py   (~1.5 min)
 """
 
 from pathlib import Path
@@ -35,10 +43,12 @@ import torch
 
 ROOT = Path(__file__).resolve().parents[1]  # repo root (this file is in scripts/)
 XML = ROOT / "src/assets/robots/unitree_g1/xmls/g1_27dof.xml"
-OUT = ROOT / "src/assets/robots/unitree_g1/hand_targets_27dof.pt"
+OUT = ROOT / "src/assets/robots/unitree_g1/hand_pose_targets_27dof.pt"
 
-N_SAMPLES = 100_000  # how many valid palm-target pairs to keep
-LIMIT_FRAC = 0.8  # sample each arm joint within the middle 80% of its range
+N_SAMPLES = 200_000  # more than v0's 100k: position + orientation is a bigger space
+LIMIT_FRAC = 0.8  # shoulders and elbow: sample within the middle 80% of the range
+WRIST_LIMIT_FRAC = 0.6  # wrists: narrower, for natural hand orientations and
+                        # to keep the wrists away from their limits
 PELVIS_HEIGHT = 0.79  # nominal standing pelvis height above the floor [m]
 RANDOM_SEED = 0  # fixed seed: running the script twice gives the same file
 
@@ -96,16 +106,17 @@ def arm_joint_sampling_ranges(model: mujoco.MjModel):
   Returns (addresses, centre, half_width): a random angle for joint i is
   centre[i] + half_width[i] * u with u uniform in [-1, 1].
   """
-  arm_joint_ids = [
-    joint_id(model, f"{side}_{joint}_joint")
-    for side in ("left", "right")  # left arm first, then right arm
-    for joint in ARM_JOINTS
-  ]
+  arm_joint_ids = []
+  fractions = []  # how much of each joint's range we sample from
+  for side in ("left", "right"):  # left arm first, then right arm
+    for joint in ARM_JOINTS:
+      arm_joint_ids.append(joint_id(model, f"{side}_{joint}_joint"))
+      fractions.append(WRIST_LIMIT_FRAC if joint.startswith("wrist") else LIMIT_FRAC)
   addresses = model.jnt_qposadr[arm_joint_ids]
   lower = model.jnt_range[arm_joint_ids, 0]  # joint limits from the XML
   upper = model.jnt_range[arm_joint_ids, 1]
   centre = (lower + upper) / 2
-  half_width = (upper - lower) / 2 * LIMIT_FRAC  # shrink: stay away from limits
+  half_width = (upper - lower) / 2 * np.array(fractions)  # stay away from limits
   return addresses, centre, half_width
 
 
@@ -152,6 +163,16 @@ def palms_in_workspace(palms: np.ndarray) -> bool:
   return bool(both_in_front and both_at_working_height and hands_not_crossed)
 
 
+def palm_rotation_matrices(data: mujoco.MjData, palm_sites: list) -> np.ndarray:
+  """The 3x3 rotation matrix of each palm, shape (2, 3, 3).
+
+  MuJoCo stores each site's rotation matrix flattened as 9 numbers
+  (site_xmat), so we reshape it back to 3x3. Indexing with a LIST returns a
+  copy, so the result is not overwritten by the next mj_forward.
+  """
+  return data.site_xmat[palm_sites].reshape(2, 3, 3)
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -167,14 +188,16 @@ def main() -> None:
   palm_sites = [site_id(model, "left_palm"), site_id(model, "right_palm")]
   arm_geoms = arm_collision_geoms(model)
 
-  # Palm positions in the default pose: where the hand targets start after a reset.
+  # Palm poses in the default pose: where the hand targets start after a reset.
   # mj_forward computes all body/site positions AND detects contacts.
   data.qpos[:] = standing_qpos
   mujoco.mj_forward(model, data)
   default_palms = data.site_xpos[palm_sites].reshape(-1).copy()  # (6,)
+  default_rotmats = palm_rotation_matrices(data, palm_sites)  # (2, 3, 3)
 
   rng = np.random.default_rng(RANDOM_SEED)
-  targets = []
+  targets = []  # palm positions, one (6,) row per kept sample
+  target_rotmats = []  # palm rotations, one (2, 3, 3) entry per kept sample
   while len(targets) < N_SAMPLES:
     # 1. Start from the standing pose, then randomise only the 14 arm joints.
     data.qpos[:] = standing_qpos
@@ -188,19 +211,29 @@ def main() -> None:
     if arm_is_touching_something(data, arm_geoms):
       continue
 
-    # 4. Keep the palm positions if they are inside the front workspace.
-    palms = data.site_xpos[palm_sites]  # 2x3: world position of each palm
+    # 4. Keep the palm poses if the palms are inside the front workspace.
+    # Indexing with a LIST (palm_sites) makes NumPy return a COPY. A slice such as
+    # site_xpos[2:4] would instead return a "view" into MuJoCo's memory, which
+    # changes on the next mj_forward.
+    palms = data.site_xpos[palm_sites]  # 2x3 copy: world position of each palm
     if palms_in_workspace(palms):
-      targets.append(palms.reshape(-1).copy())  # copy: data is overwritten next loop
+      # .copy() is defensive: not needed with the list index above, but it keeps
+      # this correct if that indexing is ever changed to a slice (a view).
+      targets.append(palms.reshape(-1).copy())
+      # The orientation of the same palms, from the same joint angles:
+      # feasible by construction, just like the position.
+      target_rotmats.append(palm_rotation_matrices(data, palm_sites))
 
   torch.save(
     {
       "targets": torch.tensor(np.array(targets), dtype=torch.float32),  # (N, 6)
+      "targets_rotmat": torch.tensor(np.array(target_rotmats), dtype=torch.float32),  # (N, 2, 3, 3)
       "default": torch.tensor(default_palms, dtype=torch.float32),  # (6,)
+      "default_rotmat": torch.tensor(default_rotmats, dtype=torch.float32),  # (2, 3, 3)
     },
     OUT,
   )
-  print(f"Saved {len(targets)} targets to {OUT}")
+  print(f"Saved {len(targets)} palm poses to {OUT}")
 
 
 if __name__ == "__main__":

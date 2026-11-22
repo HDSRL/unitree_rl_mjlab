@@ -17,10 +17,17 @@ from src.tasks.velocity.velocity_env_cfg import make_velocity_env_cfg
 
 from mjlab.managers.observation_manager import ObservationTermCfg
 from src import SRC_PATH
-from src.tasks.velocity.mdp.hand_command import HandPositionCommandCfg
-from src.tasks.velocity.mdp.hand_command import HandPositionCommandCfg, track_hand_position
+from src.tasks.velocity.mdp.hand_command import (
+  HandPoseCommandCfg,
+  HandPositionCommandCfg,
+  track_hand_orientation,
+  track_hand_position,
+)
+
 
 HAND_TARGETS_PATH = SRC_PATH / "assets/robots/unitree_g1/hand_targets_27dof.pt"
+HAND_POSE_TARGETS_PATH = SRC_PATH / "assets/robots/unitree_g1/hand_pose_targets_27dof.pt"
+
 
 
 def unitree_g1_27dof_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
@@ -276,5 +283,53 @@ def unitree_g1_27dof_hands_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnv
   robot = cfg.scene.entities["robot"]
   robot.articulation = replace(robot.articulation, soft_joint_pos_limit_factor=0.85)
 
+
+  return cfg
+
+
+def unitree_g1_27dof_hands_pose_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+  """v1: palm position AND orientation tracking.
+
+  Builds on the v0.5 hands task (one more layer on top). Everything not changed
+  here is inherited: velocity commands, posture fixes, 85% soft joint limits.
+  """
+  cfg = unitree_g1_27dof_hands_flat_env_cfg(play=play)
+
+  # Replace the position-only command with position + orientation.
+  # The "hand_command" observation reads this command, so the policy now sees
+  # 18 numbers instead of 6 (actor observation 98 -> 110).
+  cfg.commands["hands"] = HandPoseCommandCfg(
+    entity_name="robot",
+    resampling_time_range=(2.0, 4.0),
+    library_path=str(HAND_POSE_TARGETS_PATH),
+    max_speed=0.5,  # palm position glide [m/s], same as v0.5
+    max_angular_speed=1.0,  # palm orientation glide [rad/s]
+    debug_vis=True,
+  )
+
+  # Orientation tracking, next to v0.5's position rewards (weights 1.0 + 1.0).
+  # Coarse kernel (std 0.5 rad ~ 29 deg) pulls from far away; fine kernel
+  # (std 0.2 rad ~ 11 deg) sharpens. Position : orientation = 2.0 : 1.5,
+  # close to ResGAC's 4 : 3.
+  cfg.rewards["track_hands_rot"] = RewardTermCfg(
+    func=track_hand_orientation,
+    weight=0.75,
+    params={"command_name": "hands", "std": 0.5},
+  )
+  cfg.rewards["track_hands_rot_fine"] = RewardTermCfg(
+    func=track_hand_orientation,
+    weight=0.75,
+    params={"command_name": "hands", "std": 0.2},
+  )
+
+  # The wrist angles are now decided by the orientation target, so v0.5's strong
+  # pull toward the default wrist angles (std 0.3) would fight the task. Loosen
+  # it. Shoulders and elbow keep 0.5: they choose the elbow swivel, the one
+  # motion the task leaves free. Rule: regularize only what the task leaves free.
+  for regime in ("std_standing", "std_walking", "std_running"):
+    stds = cfg.rewards["pose"].params[regime]
+    for key in stds:
+      if "wrist" in key:
+        stds[key] = 1.0
 
   return cfg
