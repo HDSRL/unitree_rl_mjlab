@@ -17,17 +17,56 @@ from src.tasks.velocity.velocity_env_cfg import make_velocity_env_cfg
 
 from mjlab.managers.observation_manager import ObservationTermCfg
 from src import SRC_PATH
+from mjlab.managers.scene_entity_config import SceneEntityCfg
+from src.tasks.velocity.mdp.rewards import action_rate_l2_joints, body_upright, variable_posture
 from src.tasks.velocity.mdp.hand_command import (
   HandPoseCommandCfg,
   HandPositionCommandCfg,
+  hand_pose_error,
   track_hand_orientation,
+  track_hand_orientation_trace,
   track_hand_position,
+  track_hand_position_exp,
 )
+from mjlab.managers.curriculum_manager import CurriculumTermCfg
+from src.tasks.velocity.mdp.curriculums import hand_training_stages, penalty_curriculum
 
 
 HAND_TARGETS_PATH = SRC_PATH / "assets/robots/unitree_g1/hand_targets_27dof.pt"
 HAND_POSE_TARGETS_PATH = SRC_PATH / "assets/robots/unitree_g1/hand_pose_targets_27dof.pt"
 
+HAND_POSE_TARGETS_NATURAL_PATH = SRC_PATH / "assets/robots/unitree_g1/hand_pose_targets_27dof_natural.pt"
+
+# Joint groups (regex). Each joint matches exactly one pattern in each group.
+ARM_JOINTS = (r".*_shoulder_.*", r".*_elbow_.*", r".*_wrist_.*")
+LEG_WAIST_JOINTS = (r".*_hip_.*", r".*_knee_.*", r".*_ankle_.*", r"waist_.*")
+
+# v2 training stages (ResGAC's A-E, compressed for PPO). Steps = iterations *
+# STEPS_PER_ITERATION, which must match num_steps_per_env in rl_cfg.py (24).
+STEPS_PER_ITERATION = 24
+FULL_WALK = dict(lin_vel_x=(-0.5, 0.8), lin_vel_y=(-0.4, 0.4), ang_vel_z=(-0.8, 0.8))
+HAND_STAGES = [
+  # A: stand, broad kernels (position ~14 cm, orientation ~26 deg wide).
+  dict(step=0, standing=1.0, pos_var=0.02, pos_l1=0.0, rot_var=0.2),
+  # B: stand, tighter.
+  dict(step=1500 * STEPS_PER_ITERATION, standing=1.0, pos_var=0.01, pos_l1=0.0, rot_var=0.1),
+  # C: start walking slowly; loosen position again (walking makes it harder).
+  dict(step=3000 * STEPS_PER_ITERATION, standing=0.3,
+       lin_vel_x=(-0.3, 0.3), lin_vel_y=(-0.3, 0.3), ang_vel_z=(-0.5, 0.5),
+       pos_var=0.02, pos_l1=0.0, rot_var=0.1),
+  # D: full walking ranges, tighten.
+  dict(step=6000 * STEPS_PER_ITERATION, standing=0.3, **FULL_WALK,
+       pos_var=0.005, pos_l1=0.0, rot_var=0.05),
+  # E: final precision, ResGAC's final kernels (~3 cm + L1, ~8 deg).
+  dict(step=10000 * STEPS_PER_ITERATION, standing=0.3, **FULL_WALK,
+       pos_var=0.001, pos_l1=0.01, rot_var=0.02),
+]
+# Style penalties ramped by penalty_curriculum. Safety terms (joint_pos_limits,
+# self_collisions, is_terminated) are deliberately NOT here.
+STYLE_PENALTIES = [
+  "action_rate_legs", "action_rate_arms", "joint_acc_l2", "body_ang_vel",
+  "angular_momentum", "foot_clearance", "foot_slip", "soft_landing", "stand_still",
+]
 
 
 def unitree_g1_27dof_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
@@ -333,3 +372,133 @@ def unitree_g1_27dof_hands_pose_flat_env_cfg(play: bool = False) -> ManagerBased
         stds[key] = 1.0
 
   return cfg
+
+
+def unitree_g1_27dof_hands_v2_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+  """v2: ResGAC-style end-to-end hand pose tracking.
+
+  Builds on v1 (position + orientation command). Changes, following ResGAC:
+  pose-error observation, their reward forms, an upright reward, split posture
+  and smoothness terms, natural targets. The values here are curriculum
+  stage A (standing, broad kernels); the curriculum moves them on.
+  """
+  cfg = unitree_g1_27dof_hands_pose_flat_env_cfg(play=play)
+
+  # Natural target library: v1's had too many twisted hand poses.
+  cfg.commands["hands"].library_path = str(HAND_POSE_TARGETS_NATURAL_PATH)
+
+  # Observation: palm pose error, computed the way the robot can (24 numbers).
+  # Appended after hand_command, so the deploy obs layout only grows at the end.
+  for group in ("actor", "critic"):
+    cfg.observations[group].terms["hand_pose_error"] = ObservationTermCfg(
+      func=hand_pose_error, params={"command_name": "hands"}
+    )
+
+  # Hand rewards in ResGAC's form, replacing v1's four kernels. Start broad
+  # (var 0.02 = ~14 cm, 0.2 = ~26 deg) so the policy gets a signal from far
+  # away; the curriculum tightens them. Manipulation (2.0 + 1.5) : walking
+  # (1.0 + 1.0) ~ 2 : 1, the same ratio as ResGAC.
+  for name in ("track_hands", "track_hands_fine", "track_hands_rot", "track_hands_rot_fine"):
+    del cfg.rewards[name]
+  cfg.rewards["hand_position"] = RewardTermCfg(
+    func=track_hand_position_exp,
+    weight=2.0,
+    params={"command_name": "hands", "var": 0.02, "l1_scale": 0.0},
+  )
+  cfg.rewards["hand_orientation"] = RewardTermCfg(
+    func=track_hand_orientation_trace,
+    weight=1.5,
+    params={"command_name": "hands", "var": 0.2},
+  )
+
+  # Upright: ResGAC's pelvis-orientation reward replaces our tiny tilt penalty
+  # (training used to end episodes only at 70 deg, the robot trips at 15).
+  # Pelvis only: with the waist roll/pitch locked, the torso tilts exactly
+  # like the pelvis, so a torso term would just duplicate it.
+  del cfg.rewards["body_orientation_l2"]
+  cfg.rewards["upright"] = RewardTermCfg(
+    func=body_upright,
+    weight=1.0,
+    params={"var": 0.04, "asset_cfg": SceneEntityCfg("robot", body_names=("pelvis",))},
+  )
+
+  # Posture split. Legs and waist keep their posture reward unchanged; the
+  # arms get a separate, WEAK one (weight 0.3) whose only job is to pick a
+  # comfortable elbow angle, so it no longer competes with hand tracking.
+  # The std dicts must only contain keys for the joints in asset_cfg (each
+  # regex key must match a joint), so drop the arm keys from the legs' dicts.
+  pose = cfg.rewards["pose"]
+  pose.params["asset_cfg"].joint_names = LEG_WAIST_JOINTS
+  for regime in ("std_standing", "std_walking", "std_running"):
+    pose.params[regime] = {
+      key: std
+      for key, std in pose.params[regime].items()
+      if not any(word in key for word in ("shoulder", "elbow", "wrist"))
+    }
+  arm_std = {r".*_shoulder_.*": 0.5, r".*_elbow_.*": 0.5, r".*_wrist_.*": 1.0}
+  cfg.rewards["pose_arms"] = RewardTermCfg(
+    func=variable_posture,
+    weight=0.3,
+    params={
+      "asset_cfg": SceneEntityCfg("robot", joint_names=ARM_JOINTS),
+      "command_name": "twist",
+      "std_standing": arm_std,
+      "std_walking": arm_std,
+      "std_running": arm_std,
+      "walking_threshold": 0.1,
+      "running_threshold": 1.5,
+    },
+  )
+
+  # Smoothness split: the arms get their own action-rate penalty, at half the
+  # legs' weight (ResGAC's ratio), so the gait doesn't pay for the arms or
+  # the other way round.
+  del cfg.rewards["action_rate_l2"]
+  cfg.rewards["action_rate_legs"] = RewardTermCfg(
+    func=action_rate_l2_joints,
+    weight=-0.05,
+    params={"asset_cfg": SceneEntityCfg("robot", joint_names=LEG_WAIST_JOINTS)},
+  )
+  cfg.rewards["action_rate_arms"] = RewardTermCfg(
+    func=action_rate_l2_joints,
+    weight=-0.025,
+    params={"asset_cfg": SceneEntityCfg("robot", joint_names=ARM_JOINTS)},
+  )
+
+  # Guide terms: broad kernels that never tighten. Once the main terms are
+  # tight, a hand far from its target still gets some signal (multi-scale).
+  # A documented deviation from ResGAC (they have GAC doing the coarse work).
+  cfg.rewards["hand_position_guide"] = RewardTermCfg(
+    func=track_hand_position_exp,
+    weight=0.5,
+    params={"command_name": "hands", "var": 0.02, "l1_scale": 0.0},
+  )
+  cfg.rewards["hand_orientation_guide"] = RewardTermCfg(
+    func=track_hand_orientation_trace,
+    weight=0.25,
+    params={"command_name": "hands", "var": 0.2},
+  )
+
+  if play:
+    # Playing a trained policy: no training stages, use the final stage's walking.
+    cfg.commands["twist"].rel_standing_envs = 0.3
+    return cfg
+
+  # Training: start at stage A (standing); hand_training_stages moves on from there.
+  cfg.commands["twist"].rel_standing_envs = 1.0
+  cfg.curriculum["hand_stages"] = CurriculumTermCfg(
+    func=hand_training_stages, params={"stages": HAND_STAGES}
+  )
+  # Holosoma's PPO values: start at 10%, grow while episodes last > 750 of 1000 steps.
+  cfg.curriculum["penalty_scale"] = CurriculumTermCfg(
+    func=penalty_curriculum,
+    params={
+      "penalty_names": STYLE_PENALTIES,
+      "initial_scale": 0.1,
+      "level_up_steps": 750,
+      "level_down_steps": 150,
+      "rate": 0.00025,
+    },
+  )
+  return cfg
+

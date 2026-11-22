@@ -161,6 +161,9 @@ class HandPoseCommand(HandPositionCommand):
     # goal = where each palm should end up; target = what the policy sees now.
     self.goal_quat = self.default_quat.repeat(self.num_envs, 1, 1)  # (E, 2, 4)
     self.target_quat = self.goal_quat.clone()  # (E, 2, 4)
+    # Feet, for the robot-style pelvis-height estimate (palm_pose_estimate_h).
+    self.foot_site_ids, _ = self.robot.find_sites(cfg.foot_site_names, preserve_order=True)
+
 
     self.metrics["error_hand_rot"] = torch.zeros(self.num_envs, device=self.device)
 
@@ -189,6 +192,37 @@ class HandPoseCommand(HandPositionCommand):
     quat_error_magnitude handles q vs -q, so the answer is always in [0, pi].
     """
     return quat_error_magnitude(self.palm_quat_h(), self.target_quat)
+  
+  def palm_pose_estimate_h(self) -> tuple[torch.Tensor, torch.Tensor]:
+    """Palm poses in the heading frame, computed the way the REAL ROBOT can.
+
+    The robot measures joint angles (-> forward kinematics) and the IMU (-> roll,
+    pitch), so it knows where the palms and feet are RELATIVE TO THE PELVIS.
+    It does not measure the pelvis height above the floor, so we estimate it:
+    the lower foot stands on the floor. Training uses this same estimate, so
+    the policy sees exactly what it will see on the robot.
+
+    Returns (positions (E, 2, 3), orientations (E, 2, 4)).
+    """
+    data = self.robot.data
+    _, quat_yaw = self._heading_frame()
+    quat_yaw_both = quat_yaw.unsqueeze(1).expand(-1, 2, -1)  # same yaw for both hands
+
+    # Palms relative to the pelvis, turned into the heading frame.
+    pelvis_w = data.root_link_pos_w.unsqueeze(1)  # (E, 1, 3), broadcasts over 2 hands
+    palm_rel_h = quat_apply_inverse(quat_yaw_both, data.site_pos_w[:, self.site_ids] - pelvis_w)
+
+    # Feet height relative to the pelvis (a yaw turn doesn't change heights).
+    feet_rel_z = data.site_pos_w[:, self.foot_site_ids, 2] - data.root_link_pos_w[:, 2:3]  # (E, 2)
+    # The lower foot is on the floor, so the pelvis is this high above it:
+    pelvis_height = self.cfg.foot_site_height - feet_rel_z.min(dim=1).values  # (E,)
+
+    palm_pos = palm_rel_h.clone()  # clone: don't modify a tensor we might reuse
+    palm_pos[..., 2] += pelvis_height.unsqueeze(1)  # heights measured from the floor
+
+    # Orientation needs no estimate: forward kinematics + IMU give it fully.
+    return palm_pos, self.palm_quat_h()
+
 
   def _update_metrics(self) -> None:
     super()._update_metrics()  # position error metric (unchanged)
@@ -226,11 +260,49 @@ class HandPoseCommand(HandPositionCommand):
     new_quat = quat_mul(self.target_quat, step)
     self.target_quat = new_quat / torch.norm(new_quat, dim=-1, keepdim=True)
 
+  def _debug_vis_impl(self, visualizer: DebugVisualizer) -> None:
+    """Spheres (from the parent class) + one arrow per hand along the palm normal.
+
+    Red arrow = target, green arrow = actual palm (same colors as the spheres).
+    When a hand's orientation matches its target, the two arrows point the same way.
+    """
+    super()._debug_vis_impl(visualizer)  # the red/green position spheres
+    origin_w, quat_yaw = self._heading_frame()
+    quat_yaw_both = quat_yaw.unsqueeze(1).expand(-1, 2, -1)  # same yaw for both hands
+
+    # Targets live in the heading frame; turn them into the world for drawing:
+    # position: rotate by the pelvis yaw, then shift; orientation: q_world = q_yaw * q_heading.
+    target_pos_w = quat_apply(quat_yaw_both, self.target_h.view(-1, 2, 3)) + origin_w.unsqueeze(1)
+    target_quat_w = quat_mul(quat_yaw_both, self.target_quat)
+    palm_pos_w = self.robot.data.site_pos_w[:, self.site_ids]
+    palm_quat_w = self.robot.data.site_quat_w[:, self.site_ids]
+
+    # Palm normal, written in the hand's own frame: its sideways (y) axis, signed so
+    # both palms face the body at the default pose (left hand -y, right hand +y).
+    # If the arrow comes out of the back of the hand, flip both signs.
+    normal_local = torch.tensor(
+      [[0.0, -1.0, 0.0], [0.0, 1.0, 0.0]], device=self.device
+    ).expand(self.num_envs, 2, 3)
+    target_normal_w = quat_apply(target_quat_w, normal_local)  # rotate into the world
+    palm_normal_w = quat_apply(palm_quat_w, normal_local)
+
+    # The viewer wants NumPy arrays on the CPU.
+    tp, tn, pp, pn = (
+      x.cpu().numpy() for x in (target_pos_w, target_normal_w, palm_pos_w, palm_normal_w)
+    )
+    for i in visualizer.get_env_indices(self.num_envs):
+      for h in range(2):  # 0 = left, 1 = right
+        visualizer.add_arrow(tp[i, h], tp[i, h] + 0.22 * tn[i, h], color=(1.0, 0.2, 0.2, 0.9), width=0.012)
+        visualizer.add_arrow(pp[i, h], pp[i, h] + 0.27 * pn[i, h], color=(0.2, 0.8, 0.2, 0.9), width=0.008)
 
 @dataclass(kw_only=True)
 class HandPoseCommandCfg(HandPositionCommandCfg):
   max_angular_speed: float = 1.0
   """Max rotation speed [rad/s] of the observed orientation target."""
+  foot_site_names: tuple[str, ...] = ("left_foot", "right_foot")
+  foot_site_height: float = 0.0
+  """Height [m] of the foot sites above the floor when a foot stands flat.
+  Calibrated in sim: the sites sit at the sole, so 0.0."""
 
   def build(self, env: ManagerBasedRlEnv) -> HandPoseCommand:
     return HandPoseCommand(self, env)
@@ -247,3 +319,67 @@ def track_hand_orientation(
   assert isinstance(term, HandPoseCommand)
   angle = term.palm_rotation_error()  # (E, 2)
   return torch.exp(-torch.square(angle) / std**2).mean(dim=-1)
+
+
+
+def hand_pose_error(env: ManagerBasedRlEnv, command_name: str) -> torch.Tensor:
+  """How far each palm is from its target, as the policy sees it. Shape (E, 24).
+
+  Per hand (12 numbers):
+    [0:3]   position error = target - palm, heading frame [m]
+    [3:6]   tanh(100 * position error): ~linear below 1 cm, saturates near
+            +-1 beyond ~3 cm. Magnifies small errors (ResGAC's precision trick).
+    [6:12]  rotation error as 6D: R_err = R_palm^T * R_target, the rotation still
+            needed, seen from the palm. Aligned -> [1, 0, 0, 0, 1, 0].
+  Uses the robot-style estimate, so the real robot can compute the same numbers.
+  """
+  term = env.command_manager.get_term(command_name)
+  assert isinstance(term, HandPoseCommand)
+  palm_pos, palm_quat = term.palm_pose_estimate_h()  # (E, 2, 3), (E, 2, 4)
+
+  pos_err = term.target_h.view(-1, 2, 3) - palm_pos  # (E, 2, 3)
+  rot_err = matrix_from_quat(quat_mul(quat_inv(palm_quat), term.target_quat))  # (E, 2, 3, 3)
+  rot_err_6d = torch.cat([rot_err[..., :, 0], rot_err[..., :, 1]], dim=-1)  # (E, 2, 6)
+
+  per_hand = torch.cat([pos_err, torch.tanh(100.0 * pos_err), rot_err_6d], dim=-1)  # (E, 2, 12)
+  return per_hand.reshape(term.num_envs, 24)
+
+
+def track_hand_position_exp(
+  env: ManagerBasedRlEnv, command_name: str, var: float, l1_scale: float = 0.0
+) -> torch.Tensor:
+  """ResGAC-style position reward in [0, 1], mean over both hands:
+
+      exp(-e^2 / var - e / l1_scale)     (the L1 part only if l1_scale > 0)
+
+  e = true distance [m] from each palm to its target. `var` is a VARIANCE:
+  0.02 -> ~14 cm wide (early curriculum: a signal even far away),
+  0.001 -> ~3 cm (final). The L1 part (l1_scale 0.01) keeps a strong pull
+  even inside the last centimetre, where e^2 alone becomes flat.
+  The curriculum changes var and l1_scale during training.
+  """
+  term = env.command_manager.get_term(command_name)
+  assert isinstance(term, HandPositionCommand)
+  e = term.palm_error()  # (E, 2)
+  exponent = torch.square(e) / var
+  if l1_scale > 0.0:
+    exponent = exponent + e / l1_scale
+  return torch.exp(-exponent).mean(dim=-1)
+
+
+def track_hand_orientation_trace(
+  env: ManagerBasedRlEnv, command_name: str, var: float
+) -> torch.Tensor:
+  """ResGAC-style orientation reward in [0, 1], mean over both hands:
+
+      exp(-trace_error / var),  trace_error = 3 - trace(R_target^T R_palm)
+                                            = 2 (1 - cos(angle))
+
+  For small angles trace_error ~ angle^2, so var also acts like a variance:
+  0.2 -> ~26 deg wide (early), 0.02 -> ~8 deg (final).
+  """
+  term = env.command_manager.get_term(command_name)
+  assert isinstance(term, HandPoseCommand)
+  angle = term.palm_rotation_error()  # (E, 2) radians, ground truth
+  trace_error = 2.0 * (1.0 - torch.cos(angle))
+  return torch.exp(-trace_error / var).mean(dim=-1)

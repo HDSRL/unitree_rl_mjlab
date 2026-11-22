@@ -60,3 +60,12 @@ def unitree_g1_27dof_hands_pose_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
   # instead of 10k. The extra 1 makes the last checkpoint model_15000.pt.
   cfg.max_iterations = 15001
   return cfg
+
+def unitree_g1_27dof_hands_v2_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
+  """v2 (ResGAC-style E2E): same PPO settings, own log folder.
+  15k iterations covers all curriculum stages (stage E starts at 10k)."""
+  cfg = unitree_g1_27dof_ppo_runner_cfg()
+  cfg.experiment_name = "g1_27dof_hands_v2"
+  cfg.max_iterations = 15001
+  return cfg
+

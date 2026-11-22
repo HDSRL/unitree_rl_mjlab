@@ -24,9 +24,13 @@ Output file (a dict saved with torch.save):
   "default":        (6,)         float32, palm positions in the default pose
   "default_rotmat": (2, 3, 3)    float32, palm rotations in the default pose
 
-History: v0 and v0.5 were trained on hand_targets_27dof.pt (positions only,
-all arm joints sampled within 80% of their range), made by this script at
-commit 6aa2261.
+History:
+  v0, v0.5: hand_targets_27dof.pt, positions only, all arm joints at 80% of
+            their range (this script at commit 6aa2261).
+  v1:       hand_pose_targets_27dof.pt, shoulders/elbow 80%, wrists 60%. Too
+            many twisted poses: palm orientation median 111 deg from default.
+  v2:       hand_pose_targets_27dof_natural.pt (this version), natural ranges
+            per joint: orientation median 77 deg, same reach workspace.
 
 Run from the repo root:  python scripts/build_hand_targets.py   (~1.5 min)
 """
@@ -43,12 +47,20 @@ import torch
 
 ROOT = Path(__file__).resolve().parents[1]  # repo root (this file is in scripts/)
 XML = ROOT / "src/assets/robots/unitree_g1/xmls/g1_27dof.xml"
-OUT = ROOT / "src/assets/robots/unitree_g1/hand_pose_targets_27dof.pt"
+# OUT = ROOT / "src/assets/robots/unitree_g1/hand_pose_targets_27dof.pt"
+OUT = ROOT / "src/assets/robots/unitree_g1/hand_pose_targets_27dof_natural.pt"
 
 N_SAMPLES = 200_000  # more than v0's 100k: position + orientation is a bigger space
-LIMIT_FRAC = 0.8  # shoulders and elbow: sample within the middle 80% of the range
-WRIST_LIMIT_FRAC = 0.6  # wrists: narrower, for natural hand orientations and
-                        # to keep the wrists away from their limits
+# How much of each arm joint's range we sample from (1.0 = full range).
+# Wide where REACHING needs it (shoulder pitch, elbow); narrow where a joint
+# mostly TWISTS the hand (shoulder yaw, wrists). Uniform wide sampling gave
+# twisted, unnatural poses that v1 could not learn.
+ARM_SAMPLING_FRACTION = {
+  "shoulder_pitch": 0.8, "elbow": 0.8,
+  "shoulder_roll": 0.5,
+  "shoulder_yaw": 0.3,
+  "wrist_roll": 0.25, "wrist_pitch": 0.25, "wrist_yaw": 0.25,
+}
 PELVIS_HEIGHT = 0.79  # nominal standing pelvis height above the floor [m]
 RANDOM_SEED = 0  # fixed seed: running the script twice gives the same file
 
@@ -111,7 +123,7 @@ def arm_joint_sampling_ranges(model: mujoco.MjModel):
   for side in ("left", "right"):  # left arm first, then right arm
     for joint in ARM_JOINTS:
       arm_joint_ids.append(joint_id(model, f"{side}_{joint}_joint"))
-      fractions.append(WRIST_LIMIT_FRAC if joint.startswith("wrist") else LIMIT_FRAC)
+      fractions.append(ARM_SAMPLING_FRACTION[joint])
   addresses = model.jnt_qposadr[arm_joint_ids]
   lower = model.jnt_range[arm_joint_ids, 0]  # joint limits from the XML
   upper = model.jnt_range[arm_joint_ids, 1]

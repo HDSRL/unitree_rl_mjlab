@@ -426,3 +426,27 @@ def stand_still(
             reward *= scale
     return reward
 
+def body_upright(
+  env: ManagerBasedRlEnv, var: float, asset_cfg: SceneEntityCfg
+) -> torch.Tensor:
+  """Reward in [0, 1] for keeping a body upright: exp(-|gravity_xy|^2 / var).
+
+  gravity_xy = horizontal part of gravity seen from the body (~ sin(tilt)).
+  var 0.04 (ResGAC): tilt 5 deg -> 0.83, 10 deg -> 0.47, 15 deg -> 0.19.
+  Always pass body_names in asset_cfg: in mjlab, an asset_cfg WITHOUT
+  body_names means "all bodies", not "the root".
+  """
+  return torch.exp(-body_orientation_l2(env, asset_cfg) / var)
+
+
+def action_rate_l2_joints(
+  env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg
+) -> torch.Tensor:
+  """action_rate_l2, but only for the joints in asset_cfg (e.g. only the arms),
+  so arms and legs can get different smoothness weights.
+
+  Assumes action i drives joint i: true for our JointPositionAction over all
+  27 joints (checked: action order == joint order).
+  """
+  delta = env.action_manager.action - env.action_manager.prev_action
+  return torch.sum(torch.square(delta[:, asset_cfg.joint_ids]), dim=1)
