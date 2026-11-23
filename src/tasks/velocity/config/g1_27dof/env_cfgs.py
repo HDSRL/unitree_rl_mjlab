@@ -68,6 +68,14 @@ STYLE_PENALTIES = [
   "angular_momentum", "foot_clearance", "foot_slip", "soft_landing", "stand_still",
 ]
 
+# v2.1 resumes from v2's model_10000 (end of stage D). A resumed run restarts the
+# env's step counter at 0, so the normal stage list would start again at stage A.
+# Instead: only the final stage, active from step 0.
+HAND_STAGES_FINAL_ONLY = [
+  dict(step=0, standing=0.3, **FULL_WALK, pos_var=0.001, pos_l1=0.01, rot_var=0.02),
+]
+
+
 
 def unitree_g1_27dof_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   """Create Unitree G1 rough terrain velocity configuration."""
@@ -502,3 +510,31 @@ def unitree_g1_27dof_hands_v2_flat_env_cfg(play: bool = False) -> ManagerBasedRl
   )
   return cfg
 
+def unitree_g1_27dof_hands_v21_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+  """v2.1: v2 with a multi-scale final stage, resumed from v2's model_10000.
+
+  Finding from v2: its final stage (tight kernels only) reached 0.6 cm median
+  but lost 15% of goals, because a hand more than ~5 cm off got almost no
+  reward signal. The ONE change here: position rewards at three widths at once,
+  so every distance has a useful signal:
+    tight (~3 cm + L1, ResGAC's)  - precision near the target (curriculum term)
+    mid   (~7 cm, new)            - bridges the gap
+    broad (~14 cm, guide 0.5->1.5) - pulls far-away hands back
+  """
+  cfg = unitree_g1_27dof_hands_v2_flat_env_cfg(play=play)
+
+  cfg.rewards["hand_position_mid"] = RewardTermCfg(
+    func=track_hand_position_exp,
+    weight=1.0,
+    params={"command_name": "hands", "var": 0.005, "l1_scale": 0.0},
+  )
+  cfg.rewards["hand_position_guide"].weight = 1.5
+
+  if play:
+    return cfg
+
+  # Resumed run: start in the final stage, penalties already at full strength
+  # (the penalty ramp would otherwise restart at 10% too).
+  cfg.curriculum["hand_stages"].params["stages"] = HAND_STAGES_FINAL_ONLY
+  cfg.curriculum["penalty_scale"].params["initial_scale"] = 1.0
+  return cfg
