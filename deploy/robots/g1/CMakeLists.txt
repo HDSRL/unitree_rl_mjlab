@@ -26,6 +26,11 @@ elseif(CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")
     set(ONNXRUNTIME_DIR "${PROJECT_SOURCE_DIR}/../../thirdparty/onnxruntime-linux-aarch64-1.22.0")
 endif()
 
+
+# MuJoCo (the copy in simulate/mujoco), used by palm_kinematics.cpp for forward kinematics.
+set(MUJOCO_DIR "${PROJECT_SOURCE_DIR}/../../../simulate/mujoco")
+
+
 include_directories(
   /usr/include/eigen3
   /usr/local/include/ddscxx
@@ -34,6 +39,8 @@ include_directories(
   ${ONNXRUNTIME_DIR}/include
   ${PROJECT_SOURCE_DIR}/../../include/
   ${PROJECT_SOURCE_DIR}/../../thirdparty/cnpy
+  ${MUJOCO_DIR}/include
+
 )
 
 file(GLOB CNPY_SRC ${PROJECT_SOURCE_DIR}/../../thirdparty/cnpy/*.cpp)
@@ -52,6 +59,7 @@ link_libraries(
   ${ONNXRUNTIME_DIR}/lib/libonnxruntime.so.1.22.0
   cnpy_lib
   ZLIB::ZLIB
+  ${MUJOCO_DIR}/lib/libmujoco.so
 )
 
 file(GLOB_RECURSE ADD_SRC_LIST
@@ -62,3 +70,6 @@ add_library(${PROJECT_NAME}_lib ${ADD_SRC_LIST})
 link_libraries(${PROJECT_NAME}_lib)
 
 add_executable(g1_ctrl main.cpp)
+
+# Step-1 check for palm forward kinematics. Run it from build/: ./test_palm_kinematics
+add_executable(test_palm_kinematics tests/test_palm_kinematics.cpp)
