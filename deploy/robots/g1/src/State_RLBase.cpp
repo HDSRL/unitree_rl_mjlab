@@ -1,6 +1,7 @@
 #include "FSM/State_RLBase.h"
 #include "unitree_articulation.h"
 #include "isaaclab/envs/mdp/observations/observations.h"
+#include "hand_observations.hpp"
 #include "isaaclab/envs/mdp/actions/joint_actions.h"
 #include <unordered_map>
 #include <stdexcept>

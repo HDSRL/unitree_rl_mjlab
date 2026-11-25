@@ -52,6 +52,8 @@ public:
         global_phase = 0;
         hand_goal.clear(); // empty = "start from the default on the next hand_command call"
         hand_target.clear();
+        hand_goal_quat.clear();
+        hand_target_quat.clear();
         episode_length = 0;
         robot->update();
         action_manager->reset();
@@ -80,6 +82,9 @@ public:
     float global_phase = 0.0f;
     std::vector<float> hand_goal; //set by buttons now; VIVE/MPC later  
     std::vector<float> hand_target; //what the policy sees, glides towards hand_goal
+    std::vector<float> hand_goal_quat;   // 8 numbers: left w x y z, then right w x y z
+    std::vector<float> hand_target_quat; // 8 numbers; rotates toward hand_goal_quat
+
 };
 
 };

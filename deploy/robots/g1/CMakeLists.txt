@@ -73,3 +73,9 @@ add_executable(g1_ctrl main.cpp)
 
 # Step-1 check for palm forward kinematics. Run it from build/: ./test_palm_kinematics
 add_executable(test_palm_kinematics tests/test_palm_kinematics.cpp)
+
+# Step-2 check for the hand command helpers. Run it from build/: ./test_hand_math
+add_executable(test_hand_math tests/test_hand_math.cpp)
+
+# Step-3 check for hand_pose_error. Run it from build/: ./test_hand_pose_error
+add_executable(test_hand_pose_error tests/test_hand_pose_error.cpp)

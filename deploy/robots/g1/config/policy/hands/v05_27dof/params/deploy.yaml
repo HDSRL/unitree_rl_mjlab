@@ -71,7 +71,7 @@ observations:
         down:  [0.25, 0.22, 0.85, 0.25, -0.22, 0.85]      # forward, waist height
         left:  [0.10, 0.40, 0.90, 0.10, -0.40, 0.90]      # wide
         right: [0.30, 0.15, 0.90, 0.30, -0.15, 0.90]      # together (box hold)
-
+  
     clip: null
     scale: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
     history_length: 1
