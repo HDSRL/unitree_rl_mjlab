@@ -173,7 +173,7 @@ class HandPoseCommand(HandPositionCommand):
     rotmat = matrix_from_quat(self.target_quat)  # (E, 2, 3, 3)
     # 6D = column 0 then column 1 of each rotation matrix: [c0x c0y c0z c1x c1y c1z].
     # (The third column is their cross product, so it carries no extra information.)
-    six_d = torch.cat([rotmat[..., :, 0], rotmat[..., :, 1]], dim=-1)  # (E, 2, 6)
+    six_d = torch.cat([rotmat[:, :, :, 0], rotmat[:, :, :, 1]], dim=-1)  # (E, 2, 6)
     return torch.cat([self.target_h, six_d.reshape(self.num_envs, 12)], dim=-1)  # (E, 18)
 
   def palm_quat_h(self) -> torch.Tensor:
@@ -322,7 +322,9 @@ def track_hand_orientation(
 
 
 
-def hand_pose_error(env: ManagerBasedRlEnv, command_name: str) -> torch.Tensor:
+def hand_pose_error(
+  env: ManagerBasedRlEnv, command_name: str, pos_noise: float = 0.0, rot_noise: float = 0.0
+) -> torch.Tensor:
   """How far each palm is from its target, as the policy sees it. Shape (E, 24).
 
   Per hand (12 numbers):
@@ -332,14 +334,26 @@ def hand_pose_error(env: ManagerBasedRlEnv, command_name: str) -> torch.Tensor:
     [6:12]  rotation error as 6D: R_err = R_palm^T * R_target, the rotation still
             needed, seen from the palm. Aligned -> [1, 0, 0, 0, 1, 0].
   Uses the robot-style estimate, so the real robot can compute the same numbers.
+
+  pos_noise [m] and rot_noise [rad]: random measurement error (training only).
+  Without it the policy learned to react very strongly to errors of a millimetre,
+  which is far below what real sensors can give, and shook on hardware. The noise
+  enters BEFORE tanh, exactly where real measurement noise would.
   """
   term = env.command_manager.get_term(command_name)
   assert isinstance(term, HandPoseCommand)
   palm_pos, palm_quat = term.palm_pose_estimate_h()  # (E, 2, 3), (E, 2, 4)
 
   pos_err = term.target_h.view(-1, 2, 3) - palm_pos  # (E, 2, 3)
-  rot_err = matrix_from_quat(quat_mul(quat_inv(palm_quat), term.target_quat))  # (E, 2, 3, 3)
-  rot_err_6d = torch.cat([rot_err[..., :, 0], rot_err[..., :, 1]], dim=-1)  # (E, 2, 6)
+  rot_err_quat = quat_mul(quat_inv(palm_quat), term.target_quat)  # (E, 2, 4)
+  if pos_noise > 0.0:
+    pos_err = pos_err + (2 * torch.rand_like(pos_err) - 1) * pos_noise  # +- pos_noise per axis
+  if rot_noise > 0.0:  # a small random turn about a random axis
+    axis = torch.randn_like(pos_err)
+    angle = (2 * torch.rand(*pos_err.shape[:2], device=pos_err.device) - 1) * rot_noise
+    rot_err_quat = quat_mul(rot_err_quat, quat_from_angle_axis(angle, axis))
+  rot_err = matrix_from_quat(rot_err_quat)  # (E, 2, 3, 3)
+  rot_err_6d = torch.cat([rot_err[:, :, :, 0], rot_err[:, :, :, 1]], dim=-1)  # (E, 2, 6)
 
   per_hand = torch.cat([pos_err, torch.tanh(100.0 * pos_err), rot_err_6d], dim=-1)  # (E, 2, 12)
   return per_hand.reshape(term.num_envs, 24)

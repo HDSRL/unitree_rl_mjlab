@@ -511,7 +511,7 @@ def unitree_g1_27dof_hands_v2_flat_env_cfg(play: bool = False) -> ManagerBasedRl
   return cfg
 
 def unitree_g1_27dof_hands_v21_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
-  """v2.1: v2 with a multi-scale final stage, resumed from v2's model_10000.
+  """v2.1: v2 with a multi-scale final stage
 
   Finding from v2: its final stage (tight kernels only) reached 0.6 cm median
   but lost 15% of goals, because a hand more than ~5 cm off got almost no
@@ -533,8 +533,7 @@ def unitree_g1_27dof_hands_v21_flat_env_cfg(play: bool = False) -> ManagerBasedR
   if play:
     return cfg
 
-  # Resumed run: start in the final stage, penalties already at full strength
-  # (the penalty ramp would otherwise restart at 10% too).
-  cfg.curriculum["hand_stages"].params["stages"] = HAND_STAGES_FINAL_ONLY
-  cfg.curriculum["penalty_scale"].params["initial_scale"] = 1.0
+  # Measurement noise on the hand error: +-5 mm and +-1.7 deg (training only).
+  cfg.observations["actor"].terms["hand_pose_error"].params.update(pos_noise=0.005, rot_noise=0.03)
+  
   return cfg
