@@ -64,7 +64,7 @@ HAND_STAGES = [
 # Style penalties ramped by penalty_curriculum. Safety terms (joint_pos_limits,
 # self_collisions, is_terminated) are deliberately NOT here.
 STYLE_PENALTIES = [
-  "action_rate_legs", "action_rate_arms", "joint_acc_l2", "body_ang_vel",
+  "action_rate_legs", "action_rate_arms", "joint_acc_l2", "joint_acc_arms", "body_ang_vel",
   "angular_momentum", "foot_clearance", "foot_slip", "soft_landing", "stand_still",
 ]
 
@@ -469,9 +469,17 @@ def unitree_g1_27dof_hands_v2_flat_env_cfg(play: bool = False) -> ManagerBasedRl
   )
   cfg.rewards["action_rate_arms"] = RewardTermCfg(
     func=action_rate_l2_joints,
-    weight=-0.025,
+    weight=-0.15,
     params={"asset_cfg": SceneEntityCfg("robot", joint_names=ARM_JOINTS)},
   )
+  # Extra acceleration penalty on the arms only; with the global joint_acc_l2 (-2.5e-7)
+  # the arms total -2.5e-6. Legs keep -2.5e-7, so the gait is not affected.
+  cfg.rewards["joint_acc_arms"] = RewardTermCfg(
+    func=mdp.joint_acc_l2,
+    weight=-2.25e-6,
+    params={"asset_cfg": SceneEntityCfg("robot", joint_names=ARM_JOINTS)},
+  )
+
 
   # Guide terms: broad kernels that never tighten. Once the main terms are
   # tight, a hand far from its target still gets some signal (multi-scale).
@@ -535,5 +543,15 @@ def unitree_g1_27dof_hands_v21_flat_env_cfg(play: bool = False) -> ManagerBasedR
 
   # Measurement noise on the hand error: +-5 mm and +-1.7 deg (training only).
   cfg.observations["actor"].terms["hand_pose_error"].params.update(pos_noise=0.005, rot_noise=0.03)
+  
+  # v2.4: v2.3 nearly stopped walking (hand rewards ~6 vs velocity 1 + 1).
+  # Make walking worth more. Arm penalties stay as in v2.3.
+  cfg.rewards["track_linear_velocity"].weight = 2.0
+  cfg.rewards["track_angular_velocity"].weight = 1.5
+
+  # Resume from v2.3's model_15000: the step counter restarts at 0 on resume, so skip
+  # the stage curriculum and apply the style penalties at full strength.
+  cfg.curriculum["hand_stages"].params["stages"] = HAND_STAGES_FINAL_ONLY
+  cfg.curriculum["penalty_scale"].params["initial_scale"] = 1.0
   
   return cfg

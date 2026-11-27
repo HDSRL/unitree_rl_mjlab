@@ -73,6 +73,7 @@ def unitree_g1_27dof_hands_v21_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
   """v2.1: same experiment folder as v2, so it can resume from v2's checkpoints.
   On resume, max_iterations counts ADDITIONAL iterations: 10000 + 5000 -> 15000."""
   cfg = unitree_g1_27dof_hands_v2_ppo_runner_cfg()
-  cfg.experiment_name = "g1_27dof_hands_v22"   # own log folder
-  cfg.max_iterations = 15001
+  cfg.experiment_name = "g1_27dof_hands_v24"   # own log folder
+  cfg.max_iterations = 4001                    # on resume: ADDITIONAL iterations
+
   return cfg
