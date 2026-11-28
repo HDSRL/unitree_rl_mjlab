@@ -209,6 +209,15 @@ void State_RLBase::open_data_log()
             }
         }
 
+        // Hand orientation command (w x y z per hand), same goal/target meaning.
+        // Needed to measure palm orientation error offline.
+        for (const char* kind : {"hand_goal_quat", "hand_target_quat"}) {
+            for (const char* name : {"Lw", "Lx", "Ly", "Lz", "Rw", "Rx", "Ry", "Rz"}) {
+                data_log_file_ << ',' << kind << '_' << name;
+            }
+        }
+
+
 
         data_log_file_ << '\n';
 
@@ -348,6 +357,15 @@ void State_RLBase::write_data_log_sample()
                            << (i < vec->size() ? (*vec)[i] : std::numeric_limits<float>::quiet_NaN());
         }
     }
+
+    // Same for the orientation command: 8 numbers, NaN when the policy has none.
+    for (const auto* vec : {&env->hand_goal_quat, &env->hand_target_quat}) {
+        for (std::size_t i = 0; i < 8; ++i) {
+            data_log_file_ << ','
+                           << (i < vec->size() ? (*vec)[i] : std::numeric_limits<float>::quiet_NaN());
+        }
+    }
+
 
 
 

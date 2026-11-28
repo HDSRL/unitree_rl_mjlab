@@ -382,6 +382,7 @@ def actual_palm_positions(
     joints = data[joint_columns("joint_pos", joint_count)].to_numpy()
     quats = data[["imu_quat_w", "imu_quat_x", "imu_quat_y", "imu_quat_z"]].to_numpy()
     palm_pos = np.zeros((len(data), 6))
+    palm_rot = np.zeros((len(data), 2, 3, 3))  # palm orientation in the heading frame
     tilt_deg = np.zeros(len(data))
     rot = np.zeros(9)
     quat_no_yaw = np.zeros(4)
@@ -400,9 +401,107 @@ def actual_palm_positions(
         mujoco.mj_kinematics(model, mj_data)
         pelvis_height = foot_height - mj_data.site_xpos[feet, 2].min()
         palm_pos[k] = (mj_data.site_xpos[palms] + [0.0, 0.0, pelvis_height]).reshape(-1)
+        # site_xmat is each site's 3x3 rotation, stored row by row (9 numbers).
+        palm_rot[k] = mj_data.site_xmat[palms].reshape(2, 3, 3)
         # Tilt = angle between the pelvis z-axis and vertical.
         tilt_deg[k] = np.degrees(np.arccos(np.clip(r_no_yaw[2, 2], -1.0, 1.0)))
-    return palm_pos, tilt_deg
+    return palm_pos, palm_rot, tilt_deg
+
+
+HAND_QUAT_AXES = ("Lw", "Lx", "Ly", "Lz", "Rw", "Rx", "Ry", "Rz")
+
+
+def orientation_error_deg(data: pd.DataFrame, palm_rot: np.ndarray) -> np.ndarray:
+    """Angle [deg] between each palm and its logged orientation target, (N, 2).
+
+    All NaN for logs without the hand_target_quat_* columns (older logs and
+    policies without an orientation command).
+    """
+    import mujoco
+
+    error = np.full((len(data), 2), np.nan)
+    columns = [f"hand_target_quat_{axis}" for axis in HAND_QUAT_AXES]
+    if not all(c in data.columns for c in columns):
+        return error
+    quats = data[columns].to_numpy()
+    target_rot = np.zeros(9)
+    for k in range(len(data)):
+        for hand in range(2):
+            q = quats[k, 4 * hand:4 * hand + 4]
+            if np.isnan(q).any():
+                continue
+            mujoco.mju_quat2Mat(target_rot, q / np.linalg.norm(q))
+            # Rotation from the actual palm to the target; its angle is the error.
+            r_err = palm_rot[k, hand].T @ target_rot.reshape(3, 3)
+            error[k, hand] = np.degrees(np.arccos(np.clip((np.trace(r_err) - 1.0) / 2.0, -1.0, 1.0)))
+    return error
+
+
+def rpy_deg_from_matrices(rot: np.ndarray) -> np.ndarray:
+    """Roll, pitch, yaw [deg] (Z-Y-X order) of rotation matrices (N, 3, 3), unwrapped over time.
+
+    Unwrapping removes the jump from +180 to -180 deg so the curves stay continuous.
+    Only singular at pitch = +-90 deg (fingers pointing straight up or down).
+    """
+    roll = np.arctan2(rot[:, 2, 1], rot[:, 2, 2])
+    pitch = np.arcsin(np.clip(-rot[:, 2, 0], -1.0, 1.0))
+    yaw = np.arctan2(rot[:, 1, 0], rot[:, 0, 0])
+    return np.degrees(np.unwrap(np.stack([roll, pitch, yaw], axis=1), axis=0))
+
+
+def quat_to_matrices(quats: np.ndarray) -> np.ndarray:
+    """(N, 4) quaternions w x y z -> (N, 3, 3) rotation matrices (NaN rows stay NaN)."""
+    w, x, y, z = (quats / np.linalg.norm(quats, axis=1, keepdims=True)).T
+    return np.stack([
+        np.stack([1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)], axis=1),
+        np.stack([2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)], axis=1),
+        np.stack([2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)], axis=1),
+    ], axis=1)
+
+
+def has_hand_quat_data(data: pd.DataFrame) -> bool:
+    """True if the log has the orientation command (logged since the hand_target_quat_* columns)."""
+    columns = [f"hand_target_quat_{axis}" for axis in HAND_QUAT_AXES]
+    return all(c in data.columns for c in columns) and bool(data[columns].notna().all(axis=1).any())
+
+
+def hand_orientation_figure(data: pd.DataFrame, joint_count: int) -> go.Figure:
+    """Commanded vs actual palm orientation per hand as roll / pitch / yaw (heading frame)."""
+    time_s = data["timestep"]
+    _, palm_rot, _ = actual_palm_positions(data, joint_count)
+    series = []  # (label, rpy (N, 2, 3), line style)
+    for kind, label, line in (
+        ("hand_goal_quat", "button goal", dict(color="#52514e", width=1, dash="dash")),
+        ("hand_target_quat", "commanded target (policy input)", dict(color="#2a78d6", width=2)),
+    ):
+        columns = [f"{kind}_{axis}" for axis in HAND_QUAT_AXES]
+        if all(c in data.columns for c in columns):
+            quats = data[columns].to_numpy().reshape(-1, 2, 4)
+            series.append((label, np.stack([rpy_deg_from_matrices(quat_to_matrices(quats[:, h])) for h in (0, 1)], axis=1), line))
+    actual = np.stack([rpy_deg_from_matrices(palm_rot[:, h]) for h in (0, 1)], axis=1)
+    series.append(("actual palm (FK + IMU)", actual, dict(color="#eb6834", width=2)))
+
+    fig = make_subplots(
+        rows=3, cols=2, shared_xaxes=True, vertical_spacing=0.06, horizontal_spacing=0.08,
+        subplot_titles=["Left palm roll", "Right palm roll", "Left palm pitch", "Right palm pitch",
+                        "Left palm yaw", "Right palm yaw"],
+    )
+    for hand in range(2):
+        for axis, name in enumerate(("roll", "pitch", "yaw")):
+            for label, values, line in series:
+                fig.add_trace(
+                    go.Scatter(x=time_s, y=values[:, hand, axis], name=label, line=line, legendgroup=label,
+                               showlegend=(hand == 0 and axis == 0)),
+                    row=axis + 1, col=hand + 1,
+                )
+            fig.update_yaxes(title_text=f"{name} [deg]", row=axis + 1, col=hand + 1)
+    fig.update_xaxes(title_text="time [s]", row=3, col=1)
+    fig.update_xaxes(title_text="time [s]", row=3, col=2)
+    fig.update_layout(
+        title="Hand orientation (heading frame, roll-pitch-yaw; actual = FK from logged joints + IMU)",
+        height=950, hovermode="x unified", legend=dict(orientation="h", yanchor="bottom", y=1.02),
+    )
+    return fig
 
 
 def hand_tracking_figure(data: pd.DataFrame, joint_count: int) -> go.Figure:
@@ -410,7 +509,8 @@ def hand_tracking_figure(data: pd.DataFrame, joint_count: int) -> go.Figure:
     time_s = data["timestep"]
     goal = data[[f"hand_goal_{axis}" for axis in HAND_AXES]].to_numpy()
     target = data[[f"hand_target_{axis}" for axis in HAND_AXES]].to_numpy()
-    actual, tilt_deg = actual_palm_positions(data, joint_count)
+    actual, palm_rot, tilt_deg = actual_palm_positions(data, joint_count)
+    rot_error_deg = orientation_error_deg(data, palm_rot)
     error_cm = 100.0 * np.stack(
         [np.linalg.norm(actual[:, 3 * h:3 * h + 3] - target[:, 3 * h:3 * h + 3], axis=1)
          for h in (0, 1)],
@@ -418,18 +518,19 @@ def hand_tracking_figure(data: pd.DataFrame, joint_count: int) -> go.Figure:
     )
 
     fig = make_subplots(
-        rows=5,
+        rows=6,
         cols=2,
         shared_xaxes=True,
         vertical_spacing=0.05,
         horizontal_spacing=0.08,
         # Last row: one wide tilt plot across both columns.
-        specs=[[{}, {}]] * 4 + [[{"colspan": 2}, None]],
+        specs=[[{}, {}]] * 5 + [[{"colspan": 2}, None]],
         subplot_titles=[
             "Left palm x", "Right palm x",
             "Left palm y", "Right palm y",
             "Left palm z", "Right palm z",
             "Left tracking error", "Right tracking error",
+            "Left orientation error", "Right orientation error",
             "Pelvis tilt",
         ],
     )
@@ -457,19 +558,25 @@ def hand_tracking_figure(data: pd.DataFrame, joint_count: int) -> go.Figure:
             row=4, col=hand + 1,
         )
         fig.update_yaxes(title_text="error [cm]", row=4, col=hand + 1)
+        fig.add_trace(
+            go.Scatter(x=time_s, y=rot_error_deg[:, hand], name="orientation error",
+                       showlegend=False, line=dict(color="#0b0b0b", width=1.5)),
+            row=5, col=hand + 1,
+        )
+        fig.update_yaxes(title_text="error [deg]", row=5, col=hand + 1)
 
     fig.add_trace(
         go.Scatter(x=time_s, y=tilt_deg, name="pelvis tilt", showlegend=False,
                    line=dict(color="#0b0b0b", width=1.5)),
-        row=5, col=1,
+        row=6, col=1,
     )
     fig.add_hline(y=15.0, line=dict(color="#52514e", width=1, dash="dash"),
-                  annotation_text="safety trip 15°", row=5, col=1)
-    fig.update_yaxes(title_text="tilt [deg]", row=5, col=1)
-    fig.update_xaxes(title_text="time [s]", row=5, col=1)
+                  annotation_text="safety trip 15°", row=6, col=1)
+    fig.update_yaxes(title_text="tilt [deg]", row=6, col=1)
+    fig.update_xaxes(title_text="time [s]", row=6, col=1)
     fig.update_layout(
         title="Hand tracking (heading frame; actual = FK from logged joints + IMU)",
-        height=1300,
+        height=1550,
         hovermode="x unified",
         legend=dict(orientation="h", yanchor="bottom", y=1.02),
     )
@@ -513,6 +620,9 @@ def main() -> None:
     # Hands policies log their hand command; add the tracking section only then.
     if len(joint_names) == 27 and has_hand_data(data):
         figures.append(hand_tracking_figure(data, len(joint_names)))
+        # Orientation command is logged since the hand_*_quat columns were added.
+        if has_hand_quat_data(data):
+            figures.append(hand_orientation_figure(data, len(joint_names)))
 
     html = [
         "<!DOCTYPE html><html><head><meta charset='utf-8'>",
